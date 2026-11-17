@@ -1,0 +1,2 @@
+# hook ต้องเป็น LF ไม่งั้น sh อ่าน "set -e" ผิด
+.githooks/* text eol=lf
