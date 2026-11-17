@@ -1,0 +1,277 @@
+openapi: 3.1.0
+info:
+  title: pilot-shortlink API
+  version: 0.1.0
+  description: |
+    สัญญากลางของ backend A (Cloudflare Workers + Rust + D1) และ B (Go + Neon) ทั้งสองต้องผ่าน contract test ชุดเดียวกัน
+    Auth ใช้ cookie `session` (HttpOnly, Secure, SameSite=Lax, 7 วัน) request ที่เปลี่ยนข้อมูลต้องมี header `Origin` ตรงกับโดเมนของแอป
+    Error ทุกตัวเป็น `application/problem+json` (RFC 9457) และมี `code` ให้ frontend เลือกข้อความ
+    ลิงก์ที่ไม่มีและลิงก์ของคนอื่นตอบ 404 รูปแบบเดียวกัน ไม่บอกว่ามีอยู่
+servers:
+  - url: /
+security:
+  - session: []
+paths:
+  /api/auth/register:
+    post:
+      summary: สมัครและเข้าสู่ระบบทันที
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Credentials' }
+      responses:
+        '201':
+          description: สร้างบัญชีแล้ว
+          headers: { Set-Cookie: { $ref: '#/components/headers/SessionCookie' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Invalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/login:
+    post:
+      summary: เข้าสู่ระบบ
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Credentials' }
+      responses:
+        '200':
+          description: เข้าสู่ระบบแล้ว
+          headers: { Set-Cookie: { $ref: '#/components/headers/SessionCookie' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/logout:
+    post:
+      summary: ออกจากระบบ ทำให้ session เดิมใช้ไม่ได้ทันที
+      responses:
+        '204': { description: ออกจากระบบแล้ว (เรียกซ้ำได้ ผลเท่าเดิม) }
+  /api/me:
+    get:
+      summary: ผู้ใช้ปัจจุบัน
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/links:
+    get:
+      summary: ลิงก์ของผู้ใช้ปัจจุบัน ใหม่สุดก่อน
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/LinkSummary' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: สร้างลิงก์สั้น
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLink' }
+      responses:
+        '201': { description: สร้างแล้ว, content: { application/json: { schema: { $ref: '#/components/schemas/LinkSummary' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Invalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/links/{code}:
+    parameters:
+      - $ref: '#/components/parameters/Code'
+    patch:
+      summary: แก้ปลายทาง (P1)
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              additionalProperties: false
+              properties: { url: { $ref: '#/components/schemas/TargetUrl' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LinkSummary' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Invalid' }
+    delete:
+      summary: ลบลิงก์และสถิติของลิงก์
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204': { description: ลบแล้ว }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/links/{code}/stats:
+    parameters:
+      - $ref: '#/components/parameters/Code'
+    get:
+      summary: สถิติ 30 วันล่าสุด (คืนครั้งเดียว จึงไม่มี state ข้อมูลมาไม่ครบ)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Stats' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /{code}:
+    parameters:
+      - $ref: '#/components/parameters/Code'
+    get:
+      summary: เปิดลิงก์สั้น นับคลิกแล้วพาไปปลายทาง
+      security: []
+      responses:
+        '302':
+          description: ไปปลายทาง
+          headers:
+            Location: { schema: { type: string, format: uri } }
+            Cache-Control: { schema: { type: string, const: no-store } }
+        '404':
+          description: หน้า HTML "ไม่พบลิงก์นี้"
+          content: { text/html: { schema: { type: string } } }
+  /health:
+    get:
+      summary: ตรวจว่า service ทำงาน
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties: { status: { type: string, const: ok } }
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: session }
+  headers:
+    SessionCookie:
+      description: session=<token สุ่ม 32 byte base64url>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
+      schema: { type: string }
+  parameters:
+    Code:
+      name: code
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$' }
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      description: ต้องตรงกับ origin ของแอป ไม่ตรงตอบ 403
+      schema: { type: string }
+  schemas:
+    Credentials:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 10, maxLength: 128 }
+    Me:
+      type: object
+      required: [email]
+      properties: { email: { type: string, format: email } }
+    TargetUrl:
+      type: string
+      format: uri
+      maxLength: 2048
+      pattern: '^https?://'
+      description: ต้องเป็น http หรือ https และห้ามชี้กลับมาที่โดเมนของแอป
+    CreateLink:
+      type: object
+      required: [url]
+      additionalProperties: false
+      properties:
+        url: { $ref: '#/components/schemas/TargetUrl' }
+        alias:
+          type: string
+          minLength: 3
+          maxLength: 32
+          pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{1,30}[A-Za-z0-9])?$'
+          description: ไม่สนตัวพิมพ์ เก็บเป็นตัวพิมพ์เล็ก ห้ามคำสงวน api app admin login logout register static assets health openapi
+    LinkSummary:
+      type: object
+      required: [code, url, createdAt, clicksTotal, last30Days]
+      properties:
+        code: { type: string }
+        url: { type: string, format: uri }
+        createdAt: { type: string, format: date-time }
+        clicksTotal: { type: integer, minimum: 0 }
+        last30Days:
+          type: array
+          minItems: 30
+          maxItems: 30
+          items: { type: integer, minimum: 0 }
+          description: จำนวนคลิกรายวัน (UTC) เก่าสุดก่อน วันสุดท้ายคือวันนี้
+    Stats:
+      type: object
+      required: [code, clicksTotal, daily, referrers]
+      properties:
+        code: { type: string }
+        clicksTotal: { type: integer, minimum: 0 }
+        daily:
+          type: array
+          minItems: 30
+          maxItems: 30
+          items:
+            type: object
+            required: [date, clicks]
+            properties:
+              date: { type: string, format: date }
+              clicks: { type: integer, minimum: 0 }
+        referrers:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            required: [host, clicks]
+            properties:
+              host: { type: [string, 'null'], description: null คือไม่ทราบที่มา }
+              clicks: { type: integer, minimum: 0 }
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code:
+          type: string
+          enum: [unauthorized, forbidden_origin, not_found, email_taken, alias_taken, invalid_url, self_link, invalid_alias, reserved_alias, weak_password, invalid_body, rate_limited]
+        field: { type: string, description: 'ช่องที่ผิด เช่น url, alias, email, password' }
+  responses:
+    Unauthorized:
+      description: ไม่ได้เข้าสู่ระบบ session หมดอายุ หรือ email/รหัสผ่านไม่ถูกต้อง
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Forbidden:
+      description: Origin ไม่ตรงกับแอป
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    NotFound:
+      description: ไม่มีลิงก์นี้ หรือเป็นลิงก์ของคนอื่น (ตอบเหมือนกัน)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Conflict:
+      description: alias หรือ email ถูกใช้แล้ว
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Invalid:
+      description: ข้อมูลไม่ผ่านเงื่อนไข `code` และ `field` บอกสาเหตุ
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    RateLimited:
+      description: เกินจำนวนครั้งที่กำหนด
+      headers:
+        Retry-After: { description: วินาทีที่ต้องรอ, schema: { type: integer, minimum: 1 } }
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
