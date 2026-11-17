@@ -37,7 +37,10 @@ describe("authError", () => {
   it("tells the time when a locked login can retry", () => {
     // The message shows the viewer's local time, so the expected value is computed in the runner's timezone.
     const now = new Date("2026-11-17T10:00:00+07:00");
-    const at = new Date(now.getTime() + 600_000).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    const at = new Date(now.getTime() + 600_000).toLocaleTimeString("th-TH", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
     expect(authError(problem(429, "rate_limited", 600), "login", now).text).toBe(
       `ลองผิดหลายครั้งเกินไป ลองใหม่ได้เวลา ${at} น.`,
     );
