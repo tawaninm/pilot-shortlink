@@ -117,6 +117,7 @@ docs/                   requirements, research, architecture, test-plan, design/
   4. บริการ auth ภายนอก: hash ถูกต้องแต่เพิ่มบัญชีและ dependency และ A กับ B ต่างกัน
 - ขั้นตอนก่อนตัดสิน: deploy Worker ทดสอบที่วัด CPU ของ PBKDF2 ผ่าน WebCrypto ที่ 100,000 และ 600,000 iterations และ Argon2id ใน Wasm (ต้องใช้บัญชี Cloudflare ของตะวัน หรือ `wrangler deploy --temporary` ซึ่งยังไม่รู้ว่าโควตา CPU เท่า Free หรือไม่)
 - B ใช้ Argon2id (m=19456 KiB, t=2, p=1) ตาม OWASP ไม่ขึ้นกับ ADR นี้
+- **ผลวัด 2026-11-17** (`spikes/RESULTS.md`): Argon2id ตาม OWASP ใน Rust Wasm ใช้ CPU ราว 54 ms (median) บน Free ผ่านทุก request ไม่มี 1102 แต่เกินเพดาน 10 ms ที่เอกสารระบุ, WebCrypto PBKDF2 ถูกจำกัดที่ 100,000 iterations จึงทำตาม OWASP ไม่ได้, PBKDF2 ใน Rust ต้องใช้ราว 500 ms ตัวเลือกที่ 2 (ลดค่า hash) จึงเหลือแค่ Argon2id m=4 MiB t=1 (8 ms) ซึ่งต่ำกว่าเกณฑ์ OWASP ชัดเจน
 
 ### ADR-003: ใช้ `api/openapi.yaml` เป็นแหล่งเดียว ไม่สร้าง spec จากโค้ด
 - บริบท: มีสอง backend ต่างภาษา
