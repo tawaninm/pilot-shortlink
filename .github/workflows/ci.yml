@@ -55,4 +55,24 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-  # backend-b, contract-a, contract-b, web and e2e jobs are added by their tickets (scratch tickets C2-C9)
+  backend-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend-b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend-b/go.mod
+          cache-dependency-path: backend-b/go.sum
+      - run: go vet ./...
+      - run: go test ./... # testcontainers-go uses the Docker daemon on the runner
+      - run: docker build -t pilot-shortlink-b .
+
+  # contract-a, contract-b, web and e2e jobs are added by their tickets (scratch tickets C2-C9)
