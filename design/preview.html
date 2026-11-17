@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pilot-shortlink tokens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body { margin: 0; background: var(--color-surface); color: var(--color-text); font-family: var(--font-family-ui); font-size: var(--font-size-md); line-height: var(--font-line-height-body); }
+  main { max-width: var(--size-content-max); margin: 0 auto; padding: var(--space-8) var(--space-4); }
+  h1 { font-size: var(--font-size-xl); font-weight: var(--font-weight-semibold); line-height: var(--font-line-height-tight); margin: 0 0 var(--space-2); }
+  h2 { font-size: var(--font-size-lg); font-weight: var(--font-weight-semibold); margin: var(--space-8) 0 var(--space-3); }
+  p.muted { color: var(--color-text-muted); margin: 0; }
+  .toolbar { display: flex; gap: var(--space-2); margin-top: var(--space-4); }
+  .swatches { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+  .swatch { width: 160px; /* ds-allow: preview page layout only */ border: 1px solid var(--color-border); border-radius: var(--radius-lg); overflow: hidden; background: var(--color-surface-raised); }
+  .chip { height: 56px; } /* ds-allow: preview page layout only */
+  .swatch span { display: block; padding: var(--space-2) var(--space-3); font-family: var(--font-family-mono); font-size: var(--font-size-sm); }
+  form.create { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+  input { height: var(--component-input-height); border: 1px solid var(--component-input-border); border-radius: var(--component-input-radius); padding: 0 var(--space-3); background: var(--color-surface-raised); color: var(--color-text); font: inherit; min-width: 0; flex: 1 1 280px; } /* ds-allow: preview page layout only */
+  input:focus-visible, button:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-offset); }
+  button { height: var(--component-button-height); border: 0; border-radius: var(--component-button-radius); padding: 0 var(--space-4); background: var(--component-button-primary-bg); color: var(--component-button-primary-fg); font: inherit; font-weight: var(--font-weight-medium); cursor: pointer; }
+  button:hover { background: var(--component-button-primary-bg-hover); }
+  button.ghost { background: transparent; color: var(--color-text); border: 1px solid var(--color-border-strong); }
+  table { width: 100%; border-collapse: collapse; margin-top: var(--space-4); background: var(--color-surface-raised); border-radius: var(--radius-lg); overflow: hidden; }
+  th, td { text-align: left; height: var(--component-table-row-height); padding: 0 var(--space-3); border-bottom: 1px solid var(--component-table-row-border); }
+  th { font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); color: var(--color-text-muted); }
+  td.code, td.num { font-family: var(--font-family-mono); }
+  td.code a { color: var(--color-accent); }
+  td.num { text-align: right; }
+  td.dest { color: var(--color-text-muted); overflow-wrap: anywhere; }
+  svg.spark path { stroke: var(--component-sparkline-stroke); fill: none; stroke-width: 2; }
+  .error { color: var(--color-danger); font-size: var(--font-size-sm); margin-top: var(--space-1); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Token ของ pilot-shortlink: ทิศทาง A บัญชีลิงก์</h1>
+  <p class="muted">หน้านี้อ่านค่าจาก <code>tokens.css</code> ทั้งหมด สลับโหมดเพื่อดูทั้งสว่างและมืด</p>
+  <div class="toolbar">
+    <button type="button" class="ghost" onclick="document.documentElement.dataset.theme='light'">โหมดสว่าง</button>
+    <button type="button" class="ghost" onclick="document.documentElement.dataset.theme='dark'">โหมดมืด</button>
+  </div>
+
+  <h2>สี (semantic)</h2>
+  <div class="swatches" id="sw"></div>
+
+  <h2>ฟอร์มสร้างลิงก์</h2>
+  <form class="create" onsubmit="return false">
+    <label class="muted" for="u" style="flex-basis:100%">URL ปลายทาง</label>
+    <input id="u" placeholder="https://drive.google.com/file/d/..." aria-describedby="e">
+    <input aria-label="alias ไม่บังคับ" placeholder="alias (ไม่บังคับ)" style="flex:0 1 200px"> <!-- ds-allow: preview page layout only -->
+    <button type="submit">ย่อลิงก์</button>
+    <p class="error" id="e" style="flex-basis:100%">alias นี้มีคนใช้แล้ว ลองชื่ออื่น เช่น tawan-cv-2</p>
+  </form>
+
+  <h2>ตารางลิงก์</h2>
+  <table>
+    <thead><tr><th scope="col">ลิงก์สั้น</th><th scope="col">ปลายทาง</th><th scope="col">30 วัน</th><th scope="col" style="text-align:right">คลิก</th></tr></thead>
+    <tbody>
+      <tr><td class="code"><a href="#">/tawan-cv</a></td><td class="dest">drive.google.com/file/d/1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sT</td><td><svg class="spark" width="80" height="24" aria-hidden="true"><path d="M0 20 L16 18 L32 12 L48 16 L64 6 L80 8"/></svg></td><td class="num">142</td></tr>
+      <tr><td class="code"><a href="#">/k3x9p2a</a></td><td class="dest">github.com/tawaninm/TAWAN-OS-AGENT</td><td><svg class="spark" width="80" height="24" aria-hidden="true"><path d="M0 22 L16 22 L32 20 L48 21 L64 16 L80 18"/></svg></td><td class="num">18</td></tr>
+      <tr><td class="code"><a href="#">/ig-reel-ux-portfolio-2026</a></td><td class="dest">instagram.com/reel/ยาวมากแบบไม่มีวรรคเพื่อทดสอบการตัดบรรทัดของปลายทางที่ไม่มีช่องว่าง</td><td><svg class="spark" width="80" height="24" aria-hidden="true"><path d="M0 6 L16 10 L32 14 L48 18 L64 21 L80 22"/></svg></td><td class="num">67</td></tr>
+    </tbody>
+  </table>
+</main>
+<script>
+  const names = ['surface','surface-raised','surface-sunken','border','border-strong','text','text-muted','accent','accent-hover','on-accent','danger','focus'];
+  const box = document.getElementById('sw');
+  const render = () => {
+    box.innerHTML = '';
+    const cs = getComputedStyle(document.documentElement);
+    for (const n of names) {
+      const el = document.createElement('div');
+      el.className = 'swatch';
+      el.innerHTML = `<div class="chip" style="background:var(--color-${n})"></div><span>${n}<br>${cs.getPropertyValue('--color-' + n).trim()}</span>`; // ds-allow: token names are built from the list above
+      box.append(el);
+    }
+  };
+  render();
+  new MutationObserver(render).observe(document.documentElement, { attributes: true });
+</script>
+</body>
+</html>
