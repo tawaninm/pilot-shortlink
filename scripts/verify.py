@@ -4,6 +4,7 @@
     python scripts/verify.py a [vitest filters...]  backend A: clippy, cargo test, D1 migrate, wrangler dev, contract
     python scripts/verify.py b [vitest filters...]  backend B: vet, go test, Postgres (Docker), migrate, server, contract
     python scripts/verify.py web                    frontend: types, Biome, tsc, Vitest, build, ds-check
+    python scripts/verify.py e2e-a|e2e-b [filters]  Playwright + axe through the web app served by backend A or B
 
 Filters go to vitest as-is, e.g. `test/auth.test.ts` or `-t misc`. Without filters the whole contract suite runs.
 Conventions the backends must follow (docs/test-plan.md):
@@ -79,6 +80,10 @@ def contract(api_url: str, filters: list[str]) -> None:
     run("contract", ["pnpm", "-F", "contract", "exec", "vitest", "run", *filters], env={**os.environ, "API_URL": api_url})
 
 
+def e2e(url: str, filters: list[str]) -> None:
+    run("e2e", ["pnpm", "-F", "e2e", "test", *filters], env={**os.environ, "E2E_URL": url})
+
+
 def checks() -> None:
     run("tokens", ["node", "design/build-tokens.mjs", "--check"])
     run("typecheck", ["pnpm", "-F", "contract", "typecheck"])
@@ -102,7 +107,7 @@ def build_web() -> None:
     run("web build", ["pnpm", "-F", "web", "build"])
 
 
-def backend_a(filters: list[str]) -> None:
+def backend_a(filters: list[str], tests=None) -> None:
     a = ROOT / "backend-a"
     build_web()
     run("clippy", ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"], cwd=a)
@@ -112,12 +117,12 @@ def backend_a(filters: list[str]) -> None:
     server = start([*WRANGLER, "dev", "--port", "8787"], cwd=a)
     try:
         wait_healthy(url, server)
-        contract(url, filters)
+        (tests or contract)(url, filters)
     finally:
         stop(server)
 
 
-def backend_b(filters: list[str]) -> None:
+def backend_b(filters: list[str], tests=None) -> None:
     b = ROOT / "backend-b"
     build_web()
     # Go's embed cannot reach outside the module, so the built app is copied in (backend-b/internal/site)
@@ -144,7 +149,7 @@ def backend_b(filters: list[str]) -> None:
         run("migrate", ["go", "run", "./cmd/migrate", "up"], cwd=b, env=env)
         server = start(["go", "run", "./cmd/server"], cwd=b, env=env)
         wait_healthy(url, server)
-        contract(url, filters)
+        (tests or contract)(url, filters)
     finally:
         if server:
             stop(server)
@@ -152,7 +157,14 @@ def backend_b(filters: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    targets = {"checks": lambda _: checks(), "a": backend_a, "b": backend_b, "web": web}
+    targets = {
+        "checks": lambda _: checks(),
+        "a": backend_a,
+        "b": backend_b,
+        "web": web,
+        "e2e-a": lambda f: backend_a([], tests=lambda url, _: e2e(url, f)),
+        "e2e-b": lambda f: backend_b([], tests=lambda url, _: e2e(url, f)),
+    }
     if len(sys.argv) < 2 or sys.argv[1] not in targets:
         sys.exit(__doc__)
     targets[sys.argv[1]](sys.argv[2:])

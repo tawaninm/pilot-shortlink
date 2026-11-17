@@ -1,6 +1,6 @@
 packages:
   - contract
   - web
-  # e2e เพิ่มใน C9
+  - e2e
 # ค่าความปลอดภัย supply chain (pnpm 11 ขึ้นไปเปิดอยู่แล้ว เขียนไว้ให้เห็นชัด)
 minimumReleaseAge: 1440

@@ -1,0 +1,14 @@
+{
+  "name": "e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser tests through the real web app; run against backend A or B with E2E_URL (AC12)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6"
+  }
+}
