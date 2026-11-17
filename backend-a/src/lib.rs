@@ -13,6 +13,8 @@ pub use crate::http::problem_json_body;
 pub fn path_pattern(path: &str) -> &'static str {
     match path {
         "/" => "/",
+        "/login" => "/login",
+        "/register" => "/register",
         "/health" => "/health",
         "/api/auth/register" => "/api/auth/register",
         "/api/auth/login" => "/api/auth/login",
@@ -29,15 +31,35 @@ pub fn path_pattern(path: &str) -> &'static str {
         }
         "/api" => "/api/*",
         _ if path.starts_with("/api/") => "/api/*",
+        "/assets" => "/assets/*",
+        _ if path.starts_with("/assets/") => "/assets/*",
         _ => {
-            let trimmed = path.trim_start_matches('/');
-            if !trimmed.is_empty() && !trimmed.contains('/') {
+            if is_short_code_candidate(path).is_some() {
                 "/{code}"
             } else {
                 "/*"
             }
         }
     }
+}
+
+/// Returns `true` if `path` is one of the SPA client-side routes that should return `index.html`.
+pub fn is_spa_route(path: &str) -> bool {
+    matches!(path, "/" | "/login" | "/register")
+}
+
+/// Returns `Some(segment)` if `path` is a single-segment path that is NOT a reserved word
+/// (`links::RESERVED_ALIASES`), so reserved words like `login`, `register`, `assets`, etc.
+/// can never reach the redirect handler.
+pub fn is_short_code_candidate(path: &str) -> Option<&str> {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() || trimmed.contains('/') {
+        return None;
+    }
+    if links::is_reserved_alias(&trimmed.to_ascii_lowercase()) {
+        return None;
+    }
+    Some(trimmed)
 }
 
 #[derive(Serialize)]
@@ -139,10 +161,22 @@ async fn route_request(req: &mut Request, env: &Env) -> Result<(Response, Option
     }
 
     if method == Method::Get {
-        let trimmed = path.trim_start_matches('/');
-        if !trimmed.is_empty() && !trimmed.contains('/') {
+        if is_spa_route(&path) {
+            let assets = env.assets("ASSETS")?;
+            let mut index_url = req.url()?;
+            index_url.set_path("/");
+            index_url.set_query(None);
+            return Ok((assets.fetch(index_url.to_string(), None).await?, None));
+        }
+
+        if path == "/assets" || path.starts_with("/assets/") {
+            let assets = env.assets("ASSETS")?;
+            return Ok((assets.fetch(req.url()?.to_string(), None).await?, None));
+        }
+
+        if let Some(code) = is_short_code_candidate(&path) {
             let db = env.d1("DB")?;
-            return Ok((links::handle_redirect(req, &db, trimmed).await?, None));
+            return Ok((links::handle_redirect(req, &db, code).await?, None));
         }
     }
 
@@ -155,7 +189,7 @@ pub async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response
     let method_str = req.method().to_string();
     let raw_path = req.path();
 
-    let (response, hash_ms) = match route_request(&mut req, &env).await {
+    let (raw_response, hash_ms) = match route_request(&mut req, &env).await {
         Ok(pair) => pair,
         Err(err) => {
             let err_line = format_error_log(&err.to_string());
@@ -166,6 +200,8 @@ pub async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response
             )
         }
     };
+
+    let response = http::apply_security_headers(raw_response)?;
 
     let elapsed_ms = http::now_ms().saturating_sub(start_ms);
     let log_line = format_request_log_with_hash(
@@ -200,7 +236,39 @@ mod tests {
             path_pattern("/api/does-not-exist/user@example.com"),
             "/api/*"
         );
+        assert_eq!(path_pattern("/"), "/");
+        assert_eq!(path_pattern("/login"), "/login");
+        assert_eq!(path_pattern("/register"), "/register");
+        assert_eq!(path_pattern("/assets/index-IjLlgpqB.js"), "/assets/*");
         assert_eq!(path_pattern("/abc1234"), "/{code}");
+        assert_eq!(path_pattern("/admin"), "/*");
+    }
+
+    #[test]
+    fn spa_routes_and_reserved_words_never_reach_redirect_candidate() {
+        assert!(is_spa_route("/"));
+        assert!(is_spa_route("/login"));
+        assert!(is_spa_route("/register"));
+        assert!(!is_spa_route("/abc1234"));
+
+        for reserved in links::RESERVED_ALIASES {
+            let path = format!("/{reserved}");
+            assert_eq!(
+                is_short_code_candidate(&path),
+                None,
+                "reserved word {reserved} must not be a short code candidate"
+            );
+            let upper_path = format!("/{}", reserved.to_ascii_uppercase());
+            assert_eq!(
+                is_short_code_candidate(&upper_path),
+                None,
+                "uppercase reserved word {reserved} must not be a short code candidate"
+            );
+        }
+
+        assert_eq!(is_short_code_candidate("/abc1234"), Some("abc1234"));
+        assert_eq!(is_short_code_candidate("/assets/app.js"), None);
+        assert_eq!(is_short_code_candidate("/"), None);
     }
 
     #[test]
