@@ -146,3 +146,67 @@ fn auth_and_rate_limit_sql_queries_behave_atomically() {
         assert_eq!(count, expected);
     }
 }
+
+#[test]
+fn links_and_clicks_sql_queries_behave_atomically() {
+    let conn = setup_db();
+
+    conn.execute(
+        "INSERT INTO users (id, email, password_hash) VALUES (1, 'a@example.com', 'h1'), (2, 'b@example.com', 'h2')",
+        [],
+    )
+    .expect("insert users");
+
+    // Atomic alias insert: first succeeds, second on same code returns None (AC4).
+    let link_id: Option<i64> = conn
+        .query_row(
+            "INSERT INTO links (user_id, code, url) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(code) DO NOTHING \
+             RETURNING id",
+            rusqlite::params![1_i64, "tawan-cv", "https://example.com/cv"],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(link_id, Some(1));
+
+    let conflict_id: Option<i64> = conn
+        .query_row(
+            "INSERT INTO links (user_id, code, url) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(code) DO NOTHING \
+             RETURNING id",
+            rusqlite::params![2_i64, "tawan-cv", "https://evil.example/cv"],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(conflict_id, None);
+
+    // User 2 cannot update or delete User 1's link (AC7 / BOLA).
+    let wrong_user_patch: Option<i64> = conn
+        .query_row(
+            "UPDATE links SET url = ?1 WHERE code = ?2 AND user_id = ?3 RETURNING id",
+            rusqlite::params!["https://evil.example/", "tawan-cv", 2_i64],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(wrong_user_patch, None);
+
+    // 20 click upserts on the same (link_id, day, referrer_host) accumulate to 20.
+    for _ in 0..20 {
+        conn.execute(
+            "INSERT INTO click_daily (link_id, day, referrer_host, clicks) \
+             VALUES (?1, ?2, ?3, 1) \
+             ON CONFLICT(link_id, day, referrer_host) DO UPDATE SET clicks = clicks + 1",
+            rusqlite::params![1_i64, "2026-11-17", "www.facebook.com"],
+        )
+        .expect("upsert click_daily");
+    }
+
+    let total: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(clicks), 0) FROM click_daily WHERE link_id = ?1",
+            [1_i64],
+            |r| r.get(0),
+        )
+        .expect("sum clicks");
+    assert_eq!(total, 20);
+}

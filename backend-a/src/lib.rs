@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod http;
+pub mod links;
 pub mod session;
 
 use serde::Serialize;
@@ -113,11 +114,39 @@ async fn route_request(req: &mut Request, env: &Env) -> Result<(Response, Option
             (Method::Post, "/api/auth/login") => auth::handle_login(req, &db).await,
             (Method::Post, "/api/auth/logout") => Ok((auth::handle_logout(req, &db).await?, None)),
             (Method::Get, "/api/me") => Ok((auth::handle_me(req, &db).await?, None)),
+            (Method::Get, "/api/links") => Ok((links::handle_list_links(req, &db).await?, None)),
+            (Method::Post, "/api/links") => {
+                Ok((links::handle_create_link(req, &db, &app_origin).await?, None))
+            }
+            (m, p) if p.starts_with("/api/links/") => {
+                let rest = &p["/api/links/".len()..];
+                match (m, rest.split_once('/')) {
+                    (Method::Patch, None) if !rest.is_empty() => Ok((
+                        links::handle_patch_link(req, &db, &app_origin, rest).await?,
+                        None,
+                    )),
+                    (Method::Delete, None) if !rest.is_empty() => {
+                        Ok((links::handle_delete_link(req, &db, rest).await?, None))
+                    }
+                    (Method::Get, Some((code, "stats"))) if !code.is_empty() => {
+                        Ok((links::handle_link_stats(req, &db, code).await?, None))
+                    }
+                    _ => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
+                }
+            }
             _ => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
         };
     }
 
-    Ok((Response::error("Not Found", 404)?, None))
+    if method == Method::Get {
+        let trimmed = path.trim_start_matches('/');
+        if !trimmed.is_empty() && !trimmed.contains('/') {
+            let db = env.d1("DB")?;
+            return Ok((links::handle_redirect(req, &db, trimmed).await?, None));
+        }
+    }
+
+    Ok((links::html_not_found_response()?, None))
 }
 
 #[event(fetch)]
