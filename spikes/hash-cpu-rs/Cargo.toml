@@ -1,0 +1,20 @@
+[package]
+name = "hash_cpu_rs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "ADR-002 spike: CPU cost of Argon2id and PBKDF2 compiled into a Rust Worker"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = "=0.9.0"
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
+pbkdf2 = { version = "=0.13.0", default-features = false, features = ["hmac"] }
+sha2 = { version = "=0.11.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
