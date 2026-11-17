@@ -1,6 +1,6 @@
 # Design Brief: pilot-shortlink
 
-วันที่: 2026-11-17 | ขั้น: `uxui-workflow` 1 (ขั้น 2 ของ `web-build-workflow`) | สถานะ: รอตะวันเลือกทิศทาง
+วันที่: 2026-11-17 | ขั้น: `uxui-workflow` 1 (ขั้น 2 ของ `web-build-workflow`) | สถานะ: ตะวันเลือกทิศทาง A 2026-11-17
 
 - **Role / Context:** Claude ออกแบบแอปย่อลิงก์ที่มีหลายบัญชีและสถิติคลิก ผู้ใช้หลักคือตะวันที่แชร์ลิงก์ portfolio, CV และงานลง social ใช้ทั้งบนคอมและมือถือ (`docs/requirements.md`, `docs/research.md`)
 - **Goal:** สร้างลิงก์ได้ในไม่เกิน 10 วินาทีจากหน้าแรก และรู้ภายใน 1 หน้าว่าลิงก์ไหนมีคนเปิดเท่าไรและมาจากไหน วัดด้วย e2e (จับเวลาการสร้างลิงก์), Lighthouse performance และ accessibility อย่างน้อย 90
