@@ -70,6 +70,33 @@ describe("create link", () => {
     expect(await problem(response)).toMatchObject({ code: "self_link", field: "url" });
   });
 
+  it("S7 review: a trailing dot on the app's host is still a self_link", async () => {
+    const { api } = await registerUser();
+    const u = new URL(ORIGIN);
+    const { response } = await api.POST("/api/links", { body: { url: `${u.protocol}//${u.hostname}.${u.port ? `:${u.port}` : ""}/abc1234` } });
+    expect(response.status).toBe(422);
+    expect((await problem(response)).code).toBe("self_link");
+  });
+
+  it("S7 review: a target with Thai characters redirects (percent-encoded), not 500", async () => {
+    const { api } = await registerUser();
+    const { data, response } = await api.POST("/api/links", { body: { url: "https://example.com/ไทย?q=ลิงก์" } });
+    expect(response.status).toBe(201);
+    const res = await visit(data!.code);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toMatch(/^https:\/\/example\.com\/%E0%B9%84/i);
+  });
+
+  it("S7 review: a 64 KB body is rejected before any work, not 500", async () => {
+    const { cookie } = await registerUser();
+    const res = await fetch(`${BASE_URL}/api/links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie, Origin: ORIGIN },
+      body: JSON.stringify({ url: `https://example.com/${"a".repeat(64 * 1024)}` }),
+    });
+    expect([413, 422]).toContain(res.status);
+  });
+
   it("without a session returns 401", async () => {
     const { response } = await anon().POST("/api/links", { body: { url: TARGET } });
     expect(response.status).toBe(401);

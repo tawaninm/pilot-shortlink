@@ -34,4 +34,14 @@ describe("rate limits", () => {
     const { response } = await anon().POST("/api/auth/login", { body: { email: uniqueEmail(), password: "wrong-password-x" } });
     expect(response.status).toBe(401);
   });
+
+  it("A06 (S7 review): 10 parallel wrong logins cannot get more than 5 guesses", async () => {
+    const { email } = await registerUser();
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => anon().POST("/api/auth/login", { body: { email, password: `wrong-password-${i}` } })),
+    );
+    const statuses = results.map((r) => r.response.status);
+    expect(statuses.filter((s) => s === 401).length).toBeLessThanOrEqual(5);
+    expect(statuses.every((s) => s === 401 || s === 429)).toBe(true);
+  });
 });
