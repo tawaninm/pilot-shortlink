@@ -97,8 +97,14 @@ def web(_: list[str]) -> None:
         run("ds-check", ["node", str(DS_CHECK), "check", "web/src", "--tokens", "design/tokens.json"])
 
 
+def build_web() -> None:
+    """Both backends serve web/dist (C8, ADR-001), so the app is built before a backend starts."""
+    run("web build", ["pnpm", "-F", "web", "build"])
+
+
 def backend_a(filters: list[str]) -> None:
     a = ROOT / "backend-a"
+    build_web()
     run("clippy", ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"], cwd=a)
     run("cargo test", ["cargo", "test"], cwd=a)
     run("migrate", [*WRANGLER, "d1", "migrations", "apply", "DB", "--local"], cwd=a)
@@ -113,6 +119,12 @@ def backend_a(filters: list[str]) -> None:
 
 def backend_b(filters: list[str]) -> None:
     b = ROOT / "backend-b"
+    build_web()
+    # Go's embed cannot reach outside the module, so the built app is copied in (backend-b/internal/site)
+    site = b / "internal" / "site" / "dist"
+    if site.parent.is_dir():
+        shutil.rmtree(site, ignore_errors=True)
+        shutil.copytree(ROOT / "web" / "dist", site)
     run("vet", ["go", "vet", "./..."], cwd=b)
     run("go test", ["go", "test", "./..."], cwd=b)  # testcontainers-go needs Docker running
     subprocess.run(exe(["docker", "rm", "-f", PG_CONTAINER]), capture_output=True)
