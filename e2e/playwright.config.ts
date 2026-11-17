@@ -2,7 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "tests",
-  timeout: 30_000,
+  timeout: 60_000,
+  expect: { timeout: 15_000 }, // backend A on wrangler dev can take several seconds per Argon2 request
   fullyParallel: false, // free-tier backends and rate limits: keep it predictable
   workers: 1,
   reporter: [["list"]],

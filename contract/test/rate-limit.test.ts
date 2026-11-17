@@ -3,8 +3,12 @@ import { describe, expect, it } from "vitest";
 import { anon, problem, registerUser, uniqueEmail } from "../src/client";
 
 describe("rate limits", () => {
-  it("AC11: the 31st link created in one minute returns 429 rate_limited with Retry-After", async () => {
+  it("AC11: the 31st link created in one minute returns 429 rate_limited with Retry-After", { timeout: 120_000 }, async () => {
     const { api } = await registerUser();
+    // The limit is a fixed window per clock minute (docs/architecture.md section 5). 31 requests take up to
+    // ~25 s on a slow backend, so start early in a minute or the window resets halfway and the 31st is allowed.
+    const second = new Date().getUTCSeconds();
+    if (second > 20) await new Promise((r) => setTimeout(r, (60 - second) * 1000 + 300));
     for (let i = 0; i < 30; i++) {
       expect((await api.POST("/api/links", { body: { url: `https://example.com/${i}` } })).response.status).toBe(201);
     }
