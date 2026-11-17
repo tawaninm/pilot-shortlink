@@ -1,4 +1,7 @@
-# hook ต้องเป็น LF ไม่งั้น sh อ่าน "set -e" ผิด
+# ทุกไฟล์ข้อความเป็น LF ทุกเครื่อง: autocrlf บน Windows ทำให้ hook, tokens --check และ Biome ล้ม (2026-11-17)
+* text=auto eol=lf
+# hook ต้องเป็น LF ไม่งั้น sh อ่าน "set -e
+" ผิด
 .githooks/* text eol=lf
 # ไฟล์ที่ generate แล้วถูกตรวจแบบเทียบ byte ต้องเป็น LF ทุกเครื่อง (autocrlf บน Windows ทำให้ --check ล้ม)
 design/tokens.css text eol=lf
