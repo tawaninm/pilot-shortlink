@@ -486,7 +486,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthorized" | "forbidden_origin" | "not_found" | "email_taken" | "alias_taken" | "invalid_url" | "self_link" | "invalid_alias" | "reserved_alias" | "weak_password" | "invalid_body" | "rate_limited";
+            code: "unauthorized" | "forbidden_origin" | "not_found" | "email_taken" | "alias_taken" | "invalid_url" | "self_link" | "invalid_alias" | "reserved_alias" | "weak_password" | "invalid_body" | "rate_limited" | "internal_error";
             /** @description ช่องที่ผิด เช่น url, alias, email, password */
             field?: string;
         };
