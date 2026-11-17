@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/site"
 )
 
 // Config is everything the HTTP layer needs from the outside.
@@ -32,7 +33,15 @@ func NewHandler(cfg Config) http.Handler {
 	}
 	s := &server{Config: cfg, q: gen.New(cfg.Pool)}
 	r := chi.NewRouter()
-	r.Use(s.logRequests, s.recoverPanics)
+	r.Use(s.logRequests, s.recoverPanics, noSniff)
+
+	// The web app on the same origin (ADR-001). Static routes win over /{code} in chi, and these
+	// names are reserved aliases, so they can never collide with a short link.
+	app := site.New()
+	r.Get("/", app.Index)
+	r.Get("/login", app.Index)
+	r.Get("/register", app.Index)
+	r.Handle("/assets/*", app.Assets())
 
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -68,6 +77,14 @@ func NewHandler(cfg Config) http.Handler {
 		writeProblem(w, http.StatusMethodNotAllowed, "not_found", "")
 	})
 	return r
+}
+
+// noSniff stops browsers from guessing content types on every response (OWASP A02).
+func noSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // statusRecorder captures the status code for the request log.

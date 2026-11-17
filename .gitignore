@@ -7,3 +7,6 @@ dist/
 .wrangler/
 *.log
 .DS_Store
+!backend-b/internal/site/dist/
+backend-b/internal/site/dist/*
+!backend-b/internal/site/dist/.keep

@@ -73,7 +73,7 @@ jobs:
           cache-dependency-path: backend-b/go.sum
       - run: go vet ./...
       - run: go test ./... # testcontainers-go uses the Docker daemon on the runner
-      - run: docker build -t pilot-shortlink-b .
+      - run: docker build -f Dockerfile -t pilot-shortlink-b .. # context = repo root (web app is embedded)
 
   contract-a:
     runs-on: ubuntu-latest
