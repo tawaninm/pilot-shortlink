@@ -46,9 +46,16 @@ func NewHandler(cfg Config) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireSession)
 			r.Get("/me", s.me)
+			r.Get("/links", s.listLinks)
+			r.Post("/links", s.createLink)
+			r.Patch("/links/{code}", s.patchLink)
+			r.Delete("/links/{code}", s.deleteLink)
+			r.Get("/links/{code}/stats", s.linkStats)
 		})
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeProblem(w, http.StatusNotFound, "not_found", "") })
 	})
+
+	r.Get("/{code}", s.redirect)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {

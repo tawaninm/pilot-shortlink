@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db"
 )
 
 // Image matches the Postgres used by scripts/verify.py.
