@@ -107,3 +107,42 @@ fn foreign_keys_cascade_on_delete() {
     assert_eq!(link_count, 0);
     assert_eq!(click_count, 0);
 }
+
+#[test]
+fn auth_and_rate_limit_sql_queries_behave_atomically() {
+    let conn = setup_db();
+
+    // First insert returns the new user id.
+    let first_id: Option<i64> = conn
+        .query_row(
+            "INSERT INTO users (email, password_hash) VALUES (?1, ?2) ON CONFLICT(email) DO NOTHING RETURNING id",
+            ["alice@example.com", "phc1"],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(first_id, Some(1));
+
+    // Duplicate email returns no row instead of overwriting.
+    let dup_id: Option<i64> = conn
+        .query_row(
+            "INSERT INTO users (email, password_hash) VALUES (?1, ?2) ON CONFLICT(email) DO NOTHING RETURNING id",
+            ["alice@example.com", "phc2"],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(dup_id, None);
+
+    // Rate limit atomic upsert increments from 1 to 6.
+    for expected in 1..=6 {
+        let count: i64 = conn
+            .query_row(
+                "INSERT INTO rate_limits (key, window_start, count) VALUES (?1, ?2, 1) \
+                 ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1 \
+                 RETURNING count",
+                rusqlite::params!["login:alice@example.com", 1_800_000_i64],
+                |r| r.get(0),
+            )
+            .expect("upsert rate_limits");
+        assert_eq!(count, expected);
+    }
+}
