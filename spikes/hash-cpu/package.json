@@ -1,0 +1,9 @@
+{
+  "name": "pilot-shortlink-hash-cpu-spike",
+  "private": true,
+  "type": "module",
+  "description": "ADR-002 spike: CPU cost of PBKDF2 and Argon2id on Cloudflare Workers Free",
+  "dependencies": {
+    "hash-wasm": "4.13.0"
+  }
+}
