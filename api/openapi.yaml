@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: |
     สัญญากลางของ backend A (Cloudflare Workers + Rust + D1) และ B (Go + Neon) ทั้งสองต้องผ่าน contract test ชุดเดียวกัน
-    Auth ใช้ cookie `session` (HttpOnly, Secure, SameSite=Lax, 7 วัน) request ที่เปลี่ยนข้อมูลต้องมี header `Origin` ตรงกับโดเมนของแอป
+    Auth ใช้ cookie `session` (HttpOnly, Secure, SameSite=Lax, 7 วัน) request ที่เปลี่ยนข้อมูล (POST, PATCH, DELETE ที่ต้อง login) ต้องมี header `Origin` ตรงกับโดเมนของแอป ไม่มีหรือไม่ตรงตอบ 403 `forbidden_origin` ไม่ประกาศเป็น parameter เพราะ browser ใส่ให้เองและโค้ด frontend ตั้งค่าไม่ได้
     Error ทุกตัวเป็น `application/problem+json` (RFC 9457) และมี `code` ให้ frontend เลือกข้อความ
     ลิงก์ที่ไม่มีและลิงก์ของคนอื่นตอบ 404 รูปแบบเดียวกัน ไม่บอกว่ามีอยู่
 servers:
@@ -72,8 +72,6 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       summary: สร้างลิงก์สั้น
-      parameters:
-        - $ref: '#/components/parameters/Origin'
       requestBody:
         required: true
         content:
@@ -91,8 +89,6 @@ paths:
       - $ref: '#/components/parameters/Code'
     patch:
       summary: แก้ปลายทาง (P1)
-      parameters:
-        - $ref: '#/components/parameters/Origin'
       requestBody:
         required: true
         content:
@@ -110,8 +106,6 @@ paths:
         '422': { $ref: '#/components/responses/Invalid' }
     delete:
       summary: ลบลิงก์และสถิติของลิงก์
-      parameters:
-        - $ref: '#/components/parameters/Origin'
       responses:
         '204': { description: ลบแล้ว }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -167,12 +161,6 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: '^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$' }
-    Origin:
-      name: Origin
-      in: header
-      required: true
-      description: ต้องตรงกับ origin ของแอป ไม่ตรงตอบ 403
-      schema: { type: string }
   schemas:
     Credentials:
       type: object

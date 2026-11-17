@@ -1,0 +1,129 @@
+"""One command per ticket: run the checks, start a backend, run the contract tests, stop it.
+
+    python scripts/verify.py checks                 tokens + contract typecheck
+    python scripts/verify.py a [vitest filters...]  backend A: clippy, cargo test, D1 migrate, wrangler dev, contract
+    python scripts/verify.py b [vitest filters...]  backend B: vet, go test, Postgres (Docker), migrate, server, contract
+
+Filters go to vitest as-is, e.g. `test/auth.test.ts` or `-t misc`. Without filters the whole contract suite runs.
+Conventions the backends must follow (docs/test-plan.md):
+  A  backend-a/wrangler.toml has a D1 binding named DB, [vars] APP_ORIGIN, and serves on --port 8787
+  B  `go run ./cmd/migrate up` and `go run ./cmd/server` read DATABASE_URL, APP_ORIGIN and PORT
+Exit code 0 only when every step passed.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WRANGLER = ["npx", "--yes", "wrangler@4.163.0"]
+PG_IMAGE = "postgres:18.1-alpine"
+PG_CONTAINER = "pilot-shortlink-verify-pg"
+# rustup does not always put cargo on the Windows PATH; wrangler's build (worker-build) needs it too
+os.environ["PATH"] = os.pathsep.join([str(Path.home() / ".cargo" / "bin"), os.environ.get("PATH", "")])
+
+
+def exe(cmd: list[str]) -> list[str]:
+    path = shutil.which(cmd[0])  # resolves npx.cmd / pnpm.cmd on Windows
+    if not path:
+        sys.exit(f"verify: {cmd[0]} not found on PATH")
+    return [path, *cmd[1:]]
+
+
+def run(step: str, cmd: list[str], cwd: Path = ROOT, env: dict | None = None) -> None:
+    print(f"\n== {step}: {' '.join(cmd)}", flush=True)
+    if not cwd.is_dir():
+        sys.exit(f"verify: FAILED at {step}: {cwd.relative_to(ROOT)}/ does not exist yet")
+    if subprocess.run(exe(cmd), cwd=cwd, env=env).returncode != 0:
+        sys.exit(f"verify: FAILED at {step}")
+
+
+def start(cmd: list[str], cwd: Path, env: dict | None = None) -> subprocess.Popen:
+    print(f"\n== start: {' '.join(cmd)}", flush=True)
+    return subprocess.Popen(exe(cmd), cwd=cwd, env=env)
+
+
+def stop(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":  # wrangler starts workerd as a child; kill the whole tree
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        proc.terminate()
+    proc.wait(timeout=30)
+
+
+def wait_healthy(url: str, proc: subprocess.Popen, timeout: int = 180) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            sys.exit(f"verify: server exited with {proc.returncode} before {url} was healthy")
+        try:
+            with urllib.request.urlopen(f"{url}/health", timeout=5) as r:
+                if r.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(2)
+    sys.exit(f"verify: {url}/health not ready after {timeout}s")
+
+
+def contract(api_url: str, filters: list[str]) -> None:
+    run("contract", ["pnpm", "-F", "contract", "exec", "vitest", "run", *filters], env={**os.environ, "API_URL": api_url})
+
+
+def checks() -> None:
+    run("tokens", ["node", "design/build-tokens.mjs", "--check"])
+    run("typecheck", ["pnpm", "-F", "contract", "typecheck"])
+
+
+def backend_a(filters: list[str]) -> None:
+    a = ROOT / "backend-a"
+    run("clippy", ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"], cwd=a)
+    run("cargo test", ["cargo", "test"], cwd=a)
+    run("migrate", [*WRANGLER, "d1", "migrations", "apply", "DB", "--local"], cwd=a)
+    url = "http://localhost:8787"
+    server = start([*WRANGLER, "dev", "--port", "8787"], cwd=a)
+    try:
+        wait_healthy(url, server)
+        contract(url, filters)
+    finally:
+        stop(server)
+
+
+def backend_b(filters: list[str]) -> None:
+    b = ROOT / "backend-b"
+    run("vet", ["go", "vet", "./..."], cwd=b)
+    run("go test", ["go", "test", "./..."], cwd=b)  # testcontainers-go needs Docker running
+    subprocess.run(exe(["docker", "rm", "-f", PG_CONTAINER]), capture_output=True)
+    run("postgres", ["docker", "run", "-d", "--rm", "--name", PG_CONTAINER, "-e", "POSTGRES_PASSWORD=verify",
+                     "-p", "55432:5432", PG_IMAGE])
+    url = "http://localhost:8080"
+    env = {**os.environ, "DATABASE_URL": "postgres://postgres:verify@localhost:55432/postgres?sslmode=disable",
+           "APP_ORIGIN": url, "PORT": "8080"}
+    server = None
+    try:
+        for _ in range(30):  # Postgres needs a few seconds before it accepts connections
+            if subprocess.run(exe(["docker", "exec", PG_CONTAINER, "pg_isready", "-U", "postgres"]), capture_output=True).returncode == 0:
+                break
+            time.sleep(1)
+        run("migrate", ["go", "run", "./cmd/migrate", "up"], cwd=b, env=env)
+        server = start(["go", "run", "./cmd/server"], cwd=b, env=env)
+        wait_healthy(url, server)
+        contract(url, filters)
+    finally:
+        if server:
+            stop(server)
+        subprocess.run(exe(["docker", "rm", "-f", PG_CONTAINER]), capture_output=True)
+
+
+if __name__ == "__main__":
+    targets = {"checks": lambda _: checks(), "a": backend_a, "b": backend_b}
+    if len(sys.argv) < 2 or sys.argv[1] not in targets:
+        sys.exit(__doc__)
+    targets[sys.argv[1]](sys.argv[2:])
+    print("\nverify: PASS")

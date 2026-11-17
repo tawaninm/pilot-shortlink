@@ -1,0 +1,12 @@
+#!/bin/sh
+# Enable once per clone: git config core.hooksPath .githooks
+# Fast checks only (a few seconds). Full tests run in CI.
+set -e
+
+node design/build-tokens.mjs --check
+pnpm -F contract typecheck
+
+if git diff --cached --name-only | grep -E '(^|/)\.env($|\.)' | grep -v '\.env\.example$'; then
+  echo "pre-commit: refusing to commit an env file" >&2
+  exit 1
+fi

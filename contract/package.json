@@ -1,0 +1,19 @@
+{
+  "name": "contract",
+  "private": true,
+  "type": "module",
+  "description": "API contract tests: run against backend A or B with API_URL",
+  "//": "typescript 6: openapi-typescript 7.13.0 uses the TS compiler API, which TS 7.0 does not ship until 7.1. ponytail: move to TS 7 when openapi-typescript supports it",
+  "scripts": {
+    "types": "openapi-typescript ../api/openapi.yaml -o src/schema.ts",
+    "test": "vitest run",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "openapi-fetch": "0.17.0",
+    "openapi-typescript": "7.13.0",
+    "typescript": "6.0.3",
+    "vitest": "5.1.0"
+  }
+}
