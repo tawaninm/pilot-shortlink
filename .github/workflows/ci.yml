@@ -124,4 +124,26 @@ jobs:
       - run: pnpm -F web test
       - run: pnpm -F web build
 
-  # contract-b and e2e jobs are added by their tickets (C8-C9)
+  e2e-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend-b/go.mod
+          cache-dependency-path: backend-b/go.sum
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -F e2e exec playwright install --with-deps chromium
+      - run: python3 scripts/verify.py e2e-b # Postgres runs in Docker on the runner
+
+  # contract-b and e2e-a stay local for now: they repeat what backend-b and contract-a already cover
