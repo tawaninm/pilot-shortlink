@@ -28,3 +28,47 @@ RETURNING count;
 
 -- name: DeleteOldRates :exec
 DELETE FROM rate_limits WHERE window_start < $1;
+
+-- name: CreateLink :one
+-- No check-then-insert: the UNIQUE(code) violation decides who gets an alias (AC4).
+INSERT INTO links (user_id, code, url) VALUES ($1, $2, $3) RETURNING id, code, url, created_at;
+
+-- name: ListLinks :many
+SELECT l.id, l.code, l.url, l.created_at,
+       (SELECT coalesce(sum(c.clicks), 0) FROM click_daily c WHERE c.link_id = l.id)::bigint AS clicks_total
+FROM links l WHERE l.user_id = $1
+ORDER BY l.created_at DESC, l.id DESC;
+
+-- name: DailyClicksForUser :many
+SELECT c.link_id, c.day, sum(c.clicks)::bigint AS clicks
+FROM click_daily c JOIN links l ON l.id = c.link_id
+WHERE l.user_id = $1 AND c.day >= $2
+GROUP BY c.link_id, c.day;
+
+-- name: GetOwnLink :one
+SELECT id, code, url, created_at FROM links WHERE code = $1 AND user_id = $2;
+
+-- name: UpdateOwnLinkURL :one
+UPDATE links SET url = $3 WHERE code = $1 AND user_id = $2 RETURNING id, code, url, created_at;
+
+-- name: DeleteOwnLink :execrows
+DELETE FROM links WHERE code = $1 AND user_id = $2;
+
+-- name: LinkTotal :one
+SELECT coalesce(sum(clicks), 0)::bigint FROM click_daily WHERE link_id = $1;
+
+-- name: LinkDaily :many
+SELECT day, sum(clicks)::bigint AS clicks FROM click_daily WHERE link_id = $1 AND day >= $2 GROUP BY day;
+
+-- name: LinkReferrers :many
+SELECT referrer_host, sum(clicks)::bigint AS clicks FROM click_daily
+WHERE link_id = $1 AND day >= $2
+GROUP BY referrer_host ORDER BY clicks DESC, referrer_host LIMIT 10;
+
+-- name: GetLinkTarget :one
+SELECT id, url FROM links WHERE code = $1;
+
+-- name: CountClick :exec
+-- One atomic statement per click: concurrent visits never lose a count.
+INSERT INTO click_daily (link_id, day, referrer_host, clicks) VALUES ($1, $2, $3, 1)
+ON CONFLICT (link_id, day, referrer_host) DO UPDATE SET clicks = click_daily.clicks + 1;

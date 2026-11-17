@@ -29,6 +29,53 @@ func (q *Queries) BumpRate(ctx context.Context, arg BumpRateParams) (int32, erro
 	return count, err
 }
 
+const countClick = `-- name: CountClick :exec
+INSERT INTO click_daily (link_id, day, referrer_host, clicks) VALUES ($1, $2, $3, 1)
+ON CONFLICT (link_id, day, referrer_host) DO UPDATE SET clicks = click_daily.clicks + 1
+`
+
+type CountClickParams struct {
+	LinkID       int64
+	Day          time.Time
+	ReferrerHost string
+}
+
+// One atomic statement per click: concurrent visits never lose a count.
+func (q *Queries) CountClick(ctx context.Context, arg CountClickParams) error {
+	_, err := q.db.Exec(ctx, countClick, arg.LinkID, arg.Day, arg.ReferrerHost)
+	return err
+}
+
+const createLink = `-- name: CreateLink :one
+INSERT INTO links (user_id, code, url) VALUES ($1, $2, $3) RETURNING id, code, url, created_at
+`
+
+type CreateLinkParams struct {
+	UserID int64
+	Code   string
+	Url    string
+}
+
+type CreateLinkRow struct {
+	ID        int64
+	Code      string
+	Url       string
+	CreatedAt time.Time
+}
+
+// No check-then-insert: the UNIQUE(code) violation decides who gets an alias (AC4).
+func (q *Queries) CreateLink(ctx context.Context, arg CreateLinkParams) (CreateLinkRow, error) {
+	row := q.db.QueryRow(ctx, createLink, arg.UserID, arg.Code, arg.Url)
+	var i CreateLinkRow
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Url,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createSession = `-- name: CreateSession :exec
 INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)
 `
@@ -62,6 +109,44 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (int64, 
 	return id, err
 }
 
+const dailyClicksForUser = `-- name: DailyClicksForUser :many
+SELECT c.link_id, c.day, sum(c.clicks)::bigint AS clicks
+FROM click_daily c JOIN links l ON l.id = c.link_id
+WHERE l.user_id = $1 AND c.day >= $2
+GROUP BY c.link_id, c.day
+`
+
+type DailyClicksForUserParams struct {
+	UserID int64
+	Day    time.Time
+}
+
+type DailyClicksForUserRow struct {
+	LinkID int64
+	Day    time.Time
+	Clicks int64
+}
+
+func (q *Queries) DailyClicksForUser(ctx context.Context, arg DailyClicksForUserParams) ([]DailyClicksForUserRow, error) {
+	rows, err := q.db.Query(ctx, dailyClicksForUser, arg.UserID, arg.Day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DailyClicksForUserRow{}
+	for rows.Next() {
+		var i DailyClicksForUserRow
+		if err := rows.Scan(&i.LinkID, &i.Day, &i.Clicks); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const deleteOldRates = `-- name: DeleteOldRates :exec
 DELETE FROM rate_limits WHERE window_start < $1
 `
@@ -71,6 +156,23 @@ func (q *Queries) DeleteOldRates(ctx context.Context, windowStart time.Time) err
 	return err
 }
 
+const deleteOwnLink = `-- name: DeleteOwnLink :execrows
+DELETE FROM links WHERE code = $1 AND user_id = $2
+`
+
+type DeleteOwnLinkParams struct {
+	Code   string
+	UserID int64
+}
+
+func (q *Queries) DeleteOwnLink(ctx context.Context, arg DeleteOwnLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOwnLink, arg.Code, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteSession = `-- name: DeleteSession :exec
 DELETE FROM sessions WHERE token_hash = $1
 `
@@ -78,6 +180,50 @@ DELETE FROM sessions WHERE token_hash = $1
 func (q *Queries) DeleteSession(ctx context.Context, tokenHash string) error {
 	_, err := q.db.Exec(ctx, deleteSession, tokenHash)
 	return err
+}
+
+const getLinkTarget = `-- name: GetLinkTarget :one
+SELECT id, url FROM links WHERE code = $1
+`
+
+type GetLinkTargetRow struct {
+	ID  int64
+	Url string
+}
+
+func (q *Queries) GetLinkTarget(ctx context.Context, code string) (GetLinkTargetRow, error) {
+	row := q.db.QueryRow(ctx, getLinkTarget, code)
+	var i GetLinkTargetRow
+	err := row.Scan(&i.ID, &i.Url)
+	return i, err
+}
+
+const getOwnLink = `-- name: GetOwnLink :one
+SELECT id, code, url, created_at FROM links WHERE code = $1 AND user_id = $2
+`
+
+type GetOwnLinkParams struct {
+	Code   string
+	UserID int64
+}
+
+type GetOwnLinkRow struct {
+	ID        int64
+	Code      string
+	Url       string
+	CreatedAt time.Time
+}
+
+func (q *Queries) GetOwnLink(ctx context.Context, arg GetOwnLinkParams) (GetOwnLinkRow, error) {
+	row := q.db.QueryRow(ctx, getOwnLink, arg.Code, arg.UserID)
+	var i GetOwnLinkRow
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Url,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const getRateCount = `-- name: GetRateCount :one
@@ -127,5 +273,156 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 	row := q.db.QueryRow(ctx, getUserByEmail, email)
 	var i GetUserByEmailRow
 	err := row.Scan(&i.ID, &i.PasswordHash)
+	return i, err
+}
+
+const linkDaily = `-- name: LinkDaily :many
+SELECT day, sum(clicks)::bigint AS clicks FROM click_daily WHERE link_id = $1 AND day >= $2 GROUP BY day
+`
+
+type LinkDailyParams struct {
+	LinkID int64
+	Day    time.Time
+}
+
+type LinkDailyRow struct {
+	Day    time.Time
+	Clicks int64
+}
+
+func (q *Queries) LinkDaily(ctx context.Context, arg LinkDailyParams) ([]LinkDailyRow, error) {
+	rows, err := q.db.Query(ctx, linkDaily, arg.LinkID, arg.Day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LinkDailyRow{}
+	for rows.Next() {
+		var i LinkDailyRow
+		if err := rows.Scan(&i.Day, &i.Clicks); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const linkReferrers = `-- name: LinkReferrers :many
+SELECT referrer_host, sum(clicks)::bigint AS clicks FROM click_daily
+WHERE link_id = $1 AND day >= $2
+GROUP BY referrer_host ORDER BY clicks DESC, referrer_host LIMIT 10
+`
+
+type LinkReferrersParams struct {
+	LinkID int64
+	Day    time.Time
+}
+
+type LinkReferrersRow struct {
+	ReferrerHost string
+	Clicks       int64
+}
+
+func (q *Queries) LinkReferrers(ctx context.Context, arg LinkReferrersParams) ([]LinkReferrersRow, error) {
+	rows, err := q.db.Query(ctx, linkReferrers, arg.LinkID, arg.Day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LinkReferrersRow{}
+	for rows.Next() {
+		var i LinkReferrersRow
+		if err := rows.Scan(&i.ReferrerHost, &i.Clicks); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const linkTotal = `-- name: LinkTotal :one
+SELECT coalesce(sum(clicks), 0)::bigint FROM click_daily WHERE link_id = $1
+`
+
+func (q *Queries) LinkTotal(ctx context.Context, linkID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, linkTotal, linkID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const listLinks = `-- name: ListLinks :many
+SELECT l.id, l.code, l.url, l.created_at,
+       (SELECT coalesce(sum(c.clicks), 0) FROM click_daily c WHERE c.link_id = l.id)::bigint AS clicks_total
+FROM links l WHERE l.user_id = $1
+ORDER BY l.created_at DESC, l.id DESC
+`
+
+type ListLinksRow struct {
+	ID          int64
+	Code        string
+	Url         string
+	CreatedAt   time.Time
+	ClicksTotal int64
+}
+
+func (q *Queries) ListLinks(ctx context.Context, userID int64) ([]ListLinksRow, error) {
+	rows, err := q.db.Query(ctx, listLinks, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLinksRow{}
+	for rows.Next() {
+		var i ListLinksRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Code,
+			&i.Url,
+			&i.CreatedAt,
+			&i.ClicksTotal,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateOwnLinkURL = `-- name: UpdateOwnLinkURL :one
+UPDATE links SET url = $3 WHERE code = $1 AND user_id = $2 RETURNING id, code, url, created_at
+`
+
+type UpdateOwnLinkURLParams struct {
+	Code   string
+	UserID int64
+	Url    string
+}
+
+type UpdateOwnLinkURLRow struct {
+	ID        int64
+	Code      string
+	Url       string
+	CreatedAt time.Time
+}
+
+func (q *Queries) UpdateOwnLinkURL(ctx context.Context, arg UpdateOwnLinkURLParams) (UpdateOwnLinkURLRow, error) {
+	row := q.db.QueryRow(ctx, updateOwnLinkURL, arg.Code, arg.UserID, arg.Url)
+	var i UpdateOwnLinkURLRow
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Url,
+		&i.CreatedAt,
+	)
 	return i, err
 }
