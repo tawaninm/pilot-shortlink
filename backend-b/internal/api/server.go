@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
 )
 
 // Config is everything the HTTP layer needs from the outside.
@@ -21,6 +22,7 @@ type Config struct {
 
 type server struct {
 	Config
+	q *gen.Queries
 }
 
 // NewHandler builds the router with all middleware.
@@ -28,12 +30,24 @@ func NewHandler(cfg Config) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	s := &server{cfg}
+	s := &server{Config: cfg, q: gen.New(cfg.Pool)}
 	r := chi.NewRouter()
 	r.Use(s.logRequests, s.recoverPanics)
 
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	r.Route("/api", func(r chi.Router) {
+		r.Use(s.requireOrigin)
+		r.Post("/auth/register", s.register)
+		r.Post("/auth/login", s.login)
+		r.Post("/auth/logout", s.logout)
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireSession)
+			r.Get("/me", s.me)
+		})
+		r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeProblem(w, http.StatusNotFound, "not_found", "") })
 	})
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
