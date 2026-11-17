@@ -1,0 +1,20 @@
+[package]
+name = "pilot_shortlink_a"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "pilot-shortlink backend A: Cloudflare Workers (Rust) + D1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "=0.9.0", features = ["d1"] }
+
+[dev-dependencies]
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

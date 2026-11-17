@@ -34,4 +34,23 @@ jobs:
           git diff --exit-code contract/src/schema.ts
       - run: pnpm -F contract typecheck
 
-  # backend-a, backend-b, contract-a, contract-b, web and e2e jobs are added by their tickets (scratch tickets C1-C9)
+  backend-a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend-a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # backend-b, contract-a, contract-b, web and e2e jobs are added by their tickets (scratch tickets C2-C9)
