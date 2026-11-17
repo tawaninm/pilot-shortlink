@@ -1,6 +1,6 @@
 # Architecture: pilot-shortlink
 
-วันที่: 2026-11-17 | ระดับ: 2 | Profile: A และ B | สถานะ: ตะวันอนุมัติ 2026-11-17 ยกเว้น ADR-002 ที่รอผลวัด CPU
+วันที่: 2026-11-17 | ระดับ: 2 | Profile: A และ B | สถานะ: ตะวันอนุมัติ 2026-11-17 (รวม ADR-002 หลังวัด CPU)
 
 ## 1. ภาพรวม
 แอปย่อลิงก์ที่มีบัญชีผู้ใช้และสถิติคลิก frontend และ API contract ใช้ร่วมกัน backend ทำสองแบบเพื่อเทียบ stack ทั้งสองแบบเสิร์ฟ frontend และ API จาก origin เดียวกัน จึงไม่ต้องตั้ง CORS และ cookie `SameSite=Lax` ใช้ได้ตรงๆ
@@ -108,7 +108,7 @@ docs/                   requirements, research, architecture, test-plan, design/
 - เลือก (1): ไม่ต้องตั้ง CORS และ cookie ข้ามโดเมน ลดจุดตั้งค่าผิด B ต้องเสิร์ฟไฟล์ static เอง (Go `embed`) ซึ่งทำได้ในไม่กี่บรรทัด
 - ผล: build frontend ก่อน backend ทุกครั้ง
 
-### ADR-002: hash รหัสผ่านบน A (รอตะวันตัดสิน)
+### ADR-002: hash รหัสผ่านบน A (ตะวันตัดสิน 2026-11-17)
 - บริบท: OWASP ให้ใช้ Argon2id (19 MiB, 2 iterations) หรือ PBKDF2-HMAC-SHA256 600,000 iterations แต่ Workers Free ให้ CPU 10 ms ต่อ request ยังไม่มีตัวเลขวัดจริง (`docs/research.md` ข้อ 4)
 - ตัวเลือก:
   1. Workers Paid ($5/เดือน): ได้ Argon2id ตาม OWASP ผิดข้อจำกัด free tier
@@ -116,6 +116,9 @@ docs/                   requirements, research, architecture, test-plan, design/
   3. Passkey (WebAuthn) บน A: ไม่มีรหัสผ่านให้รั่ว ตรวจลายเซ็นใช้ CPU น้อย แต่ A กับ B จะมี flow login ต่างกัน และเปลี่ยน requirements ข้อ 3
   4. บริการ auth ภายนอก: hash ถูกต้องแต่เพิ่มบัญชีและ dependency และ A กับ B ต่างกัน
 - ขั้นตอนก่อนตัดสิน: deploy Worker ทดสอบที่วัด CPU ของ PBKDF2 ผ่าน WebCrypto ที่ 100,000 และ 600,000 iterations และ Argon2id ใน Wasm (ต้องใช้บัญชี Cloudflare ของตะวัน หรือ `wrangler deploy --temporary` ซึ่งยังไม่รู้ว่าโควตา CPU เท่า Free หรือไม่)
+- **ตัดสิน:** A ใช้ Argon2id m=19456 KiB, t=2, p=1 ตาม OWASP บน Workers Free (ค่าเดียวกับ B) ยอมรับความเสี่ยงว่า CPU ราว 54 ms เกินเพดาน 10 ms ที่เอกสารระบุ เพราะ hash เกิดแค่ตอนสมัครและ login
+- **เฝ้าดู:** log ของ A บันทึก `cpuTime` และนับ Error 1102 ของ `/api/auth/*` ถ้าพบ 1102 ให้ถือเป็น incident
+- **แผนสำรอง:** ถ้าพบ 1102 ซ้ำ ย้าย A ไป Workers Paid ($5/เดือน, CPU 30 วินาที) โดยไม่ต้องแก้โค้ด
 - B ใช้ Argon2id (m=19456 KiB, t=2, p=1) ตาม OWASP ไม่ขึ้นกับ ADR นี้
 - **ผลวัด 2026-11-17** (`spikes/RESULTS.md`): Argon2id ตาม OWASP ใน Rust Wasm ใช้ CPU ราว 54 ms (median) บน Free ผ่านทุก request ไม่มี 1102 แต่เกินเพดาน 10 ms ที่เอกสารระบุ, WebCrypto PBKDF2 ถูกจำกัดที่ 100,000 iterations จึงทำตาม OWASP ไม่ได้, PBKDF2 ใน Rust ต้องใช้ราว 500 ms ตัวเลือกที่ 2 (ลดค่า hash) จึงเหลือแค่ Argon2id m=4 MiB t=1 (8 ms) ซึ่งต่ำกว่าเกณฑ์ OWASP ชัดเจน
 
