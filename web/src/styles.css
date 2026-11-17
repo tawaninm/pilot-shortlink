@@ -1,0 +1,107 @@
+@import "tailwindcss";
+@import "../../design/tokens.css";
+
+/* Tailwind names point at semantic tokens only (DESIGN.md: primitive tokens are not used in product code).
+   Spacing keeps Tailwind's 0.25rem step, which matches the token scale (p-4 equals --space-4). */
+@theme inline {
+  --color-bg: var(--color-surface);
+  --color-raised: var(--color-surface-raised);
+  --color-sunken: var(--color-surface-sunken);
+  --color-fg: var(--color-text);
+  --color-muted: var(--color-text-muted);
+  --color-line: var(--color-border);
+  --color-line-strong: var(--color-border-strong);
+  /* Names differ from the token names on purpose: --color-accent: var(--color-accent) would point at itself. */
+  --color-brand: var(--color-accent);
+  --color-brand-hover: var(--color-accent-hover);
+  --color-on-brand: var(--color-on-accent);
+  --color-error: var(--color-danger);
+  --font-sans: var(--font-family-ui);
+  --font-mono: var(--font-family-mono);
+  --text-sm: var(--font-size-sm);
+  --text-md: var(--font-size-md);
+  --text-lg: var(--font-size-lg);
+  --text-xl: var(--font-size-xl);
+  --radius-badge: var(--radius-sm);
+  --radius-control: var(--radius-md);
+  --radius-card: var(--radius-lg);
+  --spacing: 0.25rem;
+}
+
+@layer base {
+  html {
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-family-ui);
+    line-height: var(--font-line-height-body);
+  }
+  :focus-visible {
+    outline: var(--focus-ring-width) solid var(--color-focus);
+    outline-offset: var(--focus-ring-offset);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0s !important;
+      animation-duration: 0s !important;
+    }
+  }
+}
+
+@layer components {
+  .control {
+    min-height: var(--component-input-height);
+    border: 1px solid var(--component-input-border);
+    border-radius: var(--component-input-radius);
+    background: var(--color-surface-raised);
+    padding-inline: var(--space-3);
+  }
+  .control[aria-invalid="true"] {
+    border-color: var(--color-danger);
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-height: var(--component-button-height);
+    min-width: var(--component-button-height);
+    border-radius: var(--component-button-radius);
+    padding-inline: var(--space-4);
+    font-weight: var(--font-weight-medium);
+    transition: background-color var(--motion-duration-fast) var(--motion-easing-standard);
+  }
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .btn-primary {
+    background: var(--component-button-primary-bg);
+    color: var(--component-button-primary-fg);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--component-button-primary-bg-hover);
+  }
+  .btn-quiet {
+    color: var(--color-text);
+  }
+  .btn-quiet:hover:not(:disabled) {
+    background: var(--color-surface-sunken);
+  }
+  .btn-danger {
+    background: var(--color-danger);
+    color: var(--color-on-accent);
+  }
+  .row {
+    min-height: var(--component-table-row-height);
+    border-bottom: 1px solid var(--component-table-row-border);
+  }
+  .skeleton {
+    background: var(--color-surface-sunken);
+    border-radius: var(--radius-sm);
+  }
+  .wrap-anywhere {
+    overflow-wrap: anywhere;
+  }
+}

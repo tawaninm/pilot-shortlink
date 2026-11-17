@@ -3,6 +3,7 @@
     python scripts/verify.py checks                 tokens + contract typecheck
     python scripts/verify.py a [vitest filters...]  backend A: clippy, cargo test, D1 migrate, wrangler dev, contract
     python scripts/verify.py b [vitest filters...]  backend B: vet, go test, Postgres (Docker), migrate, server, contract
+    python scripts/verify.py web                    frontend: types, Biome, tsc, Vitest, build, ds-check
 
 Filters go to vitest as-is, e.g. `test/auth.test.ts` or `-t misc`. Without filters the whole contract suite runs.
 Conventions the backends must follow (docs/test-plan.md):
@@ -83,6 +84,19 @@ def checks() -> None:
     run("typecheck", ["pnpm", "-F", "contract", "typecheck"])
 
 
+DS_CHECK = ROOT.parent / "TAWAN-OS-AGENT" / ".agents" / "skills" / "uxui-workflow" / "scripts" / "ds-check.mjs"
+
+
+def web(_: list[str]) -> None:
+    run("types in sync", ["pnpm", "-F", "web", "types"])
+    run("biome", ["pnpm", "-F", "web", "lint"])
+    run("typecheck", ["pnpm", "-F", "web", "typecheck"])
+    run("unit", ["pnpm", "-F", "web", "test"])
+    run("build", ["pnpm", "-F", "web", "build"])
+    if DS_CHECK.exists():  # the checker lives in TAWAN-OS; CI does not have it
+        run("ds-check", ["node", str(DS_CHECK), "check", "web/src", "--tokens", "design/tokens.json"])
+
+
 def backend_a(filters: list[str]) -> None:
     a = ROOT / "backend-a"
     run("clippy", ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"], cwd=a)
@@ -124,7 +138,7 @@ def backend_b(filters: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    targets = {"checks": lambda _: checks(), "a": backend_a, "b": backend_b}
+    targets = {"checks": lambda _: checks(), "a": backend_a, "b": backend_b, "web": web}
     if len(sys.argv) < 2 or sys.argv[1] not in targets:
         sys.exit(__doc__)
     targets[sys.argv[1]](sys.argv[2:])
