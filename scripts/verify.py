@@ -122,9 +122,11 @@ def backend_b(filters: list[str]) -> None:
     build_web()
     # Go's embed cannot reach outside the module, so the built app is copied in (backend-b/internal/site)
     site = b / "internal" / "site" / "dist"
-    if site.parent.is_dir():
-        shutil.rmtree(site, ignore_errors=True)
-        shutil.copytree(ROOT / "web" / "dist", site)
+    if site.is_dir():
+        for old in site.iterdir():  # keep the committed .keep placeholder
+            if old.name != ".keep":
+                shutil.rmtree(old) if old.is_dir() else old.unlink()
+        shutil.copytree(ROOT / "web" / "dist", site, dirs_exist_ok=True)
     run("vet", ["go", "vet", "./..."], cwd=b)
     run("go test", ["go", "test", "./..."], cwd=b)  # testcontainers-go needs Docker running
     subprocess.run(exe(["docker", "rm", "-f", PG_CONTAINER]), capture_output=True)

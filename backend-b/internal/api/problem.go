@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/site"
 )
 
 // problem is an RFC 9457 body. Code is one of Problem.code in api/openapi.yaml.
@@ -40,6 +42,7 @@ func writeRateLimited(w http.ResponseWriter, retryAfterSeconds int) {
 const notFoundHTML = `<!doctype html><html lang="th"><meta charset="utf-8"><title>ไม่พบลิงก์นี้</title><h1>ไม่พบลิงก์นี้</h1><p>ลิงก์อาจถูกลบหรือพิมพ์ผิด</p></html>`
 
 func writeNotFoundPage(w http.ResponseWriter) {
+	site.HTMLHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNotFound)

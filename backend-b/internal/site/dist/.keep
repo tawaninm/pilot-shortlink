@@ -1,0 +1,1 @@
+Placeholder so go:embed builds before web/dist is copied in (see site.go).

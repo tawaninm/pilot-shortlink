@@ -1,0 +1,10 @@
+node_modules
+**/node_modules
+web/dist
+backend-b/internal/site/dist/*
+!backend-b/internal/site/dist/.keep
+backend-a/target
+backend-a/build
+.wrangler
+spikes
+.git
