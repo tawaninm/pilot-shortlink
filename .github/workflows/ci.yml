@@ -75,4 +75,28 @@ jobs:
       - run: go test ./... # testcontainers-go uses the Docker daemon on the runner
       - run: docker build -t pilot-shortlink-b .
 
-  # contract-a, contract-b, web and e2e jobs are added by their tickets (scratch tickets C2-C9)
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: web types match api/openapi.yaml
+        run: |
+          pnpm -F web types
+          git diff --exit-code web/src/schema.ts
+      - run: pnpm -F web lint
+      - run: pnpm -F web typecheck
+      - run: pnpm -F web test
+      - run: pnpm -F web build
+
+  # contract-a, contract-b and e2e jobs are added by their tickets (scratch tickets C2-C9)
