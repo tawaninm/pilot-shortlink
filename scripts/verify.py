@@ -23,8 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 WRANGLER = ["npx", "--yes", "wrangler@4.163.0"]
 PG_IMAGE = "postgres:18.1-alpine"
 PG_CONTAINER = "pilot-shortlink-verify-pg"
-# rustup does not always put cargo on the Windows PATH; wrangler's build (worker-build) needs it too
-os.environ["PATH"] = os.pathsep.join([str(Path.home() / ".cargo" / "bin"), os.environ.get("PATH", "")])
+# rustup and the Go installer do not always put cargo and go on the Windows PATH; wrangler's build needs cargo too
+os.environ["PATH"] = os.pathsep.join(
+    [str(Path.home() / ".cargo" / "bin"), r"C:\Program Files\Go\bin", os.environ.get("PATH", "")]
+)
 
 
 def exe(cmd: list[str]) -> list[str]:
