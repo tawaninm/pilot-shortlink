@@ -1,0 +1,30 @@
+# Render Blueprint for pilot-shortlink Backend B (Go + Neon Postgres).
+# Spec reference: https://render.com/docs/blueprint-spec
+#
+# Note on database migrations (`/app/migrate up`):
+# Render's `free` instance type does NOT support `preDeployCommand`
+# (https://render.com/docs/deploys#pre-deploy-command,
+# https://render.com/docs/blueprint-spec#predeploycommand), nor does it support
+# SSH/Web Shell or one-off jobs (https://render.com/docs/free).
+# Putting `preDeployCommand: /app/migrate up` on `plan: free` fails Blueprint validation.
+#
+# Therefore, run the migration manually from a local machine against the Neon
+# Direct Connection URL before first deploy and before any schema-changing deploy
+# (see `docs/deploy.md`):
+#   docker build -f backend-b/Dockerfile -t pilot-shortlink-b .
+#   docker run --rm --entrypoint /app/migrate -e DATABASE_URL="<NEON_DIRECT_DATABASE_URL>" pilot-shortlink-b up
+# (or from `backend-b/`: `DATABASE_URL="<NEON_DIRECT_DATABASE_URL>" go run ./cmd/migrate up`).
+
+services:
+  - type: web
+    name: pilot-shortlink-b
+    runtime: docker
+    dockerfilePath: ./backend-b/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false # [TBC] Paste Neon pooled connection string (?sslmode=require) in Render Dashboard
+      - key: APP_ORIGIN
+        sync: false # [TBC] Set to https://pilot-shortlink-b.<SUBDOMAIN>.onrender.com (or actual Render URL, no trailing slash)

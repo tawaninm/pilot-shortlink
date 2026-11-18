@@ -14,11 +14,26 @@ not_found_handling = "none"
 [[d1_databases]]
 binding = "DB"
 database_name = "pilot-shortlink-a"
-database_id = "00000000-0000-0000-0000-000000000000" # placeholder for local dev; replace before production deploy
+database_id = "00000000-0000-0000-0000-000000000000" # placeholder for local dev
 migrations_dir = "migrations"
 
 [vars]
 APP_ORIGIN = "http://localhost:8787"
 
 [observability]
+enabled = true
+
+[env.production]
+name = "pilot-shortlink-a"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "pilot-shortlink-a"
+database_id = "<D1_DATABASE_ID>" # [TBC] replace with the UUID output of `npx wrangler@4.163.0 d1 create pilot-shortlink-a`
+migrations_dir = "migrations"
+
+[env.production.vars]
+APP_ORIGIN = "https://pilot-shortlink-a.<SUBDOMAIN>.workers.dev" # [TBC] replace <SUBDOMAIN> with the account's workers.dev subdomain
+
+[env.production.observability]
 enabled = true
