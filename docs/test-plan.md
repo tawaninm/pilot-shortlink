@@ -88,3 +88,36 @@ E2E_URL=<url> pnpm -F e2e test
 ข้อจำกัดที่รู้: rate limit เป็น fixed window ต่อนาทีตาม architecture ข้อ 5 คำขอที่คร่อมขอบนาทีได้เกิน 30 ต่อ 60 วินาที (สูงสุดราว 2 เท่า) ยอมรับสำหรับ pilot
 
 ยังไม่แก้ (design trade-off รอตะวันตัดสิน): ล็อกบัญชีคนอื่นได้ด้วยการเดาผิด 5 ครั้ง (key เป็น email อย่างเดียว), ยังไม่มี HSTS, ไม่ลบ session หมดอายุ, ไม่มี `Cache-Control: no-store` บน JSON ที่ต้อง login, cookie ไม่ใช้ prefix `__Host-`
+
+## 8. ระบบเสริม: ยืนยัน email, ลืมรหัสผ่าน, QR (2026-11-19, plan `pilot-addons`)
+
+contract test อ่านอีเมลจาก `GET /api/test/mail?to=<email>` ซึ่งมีเฉพาะเมื่อ backend รันด้วย `MAIL_MODE=capture` (`scripts/verify.py` ตั้งให้) ส่วน `registerUser()` ใน `contract/src/client.ts` สมัครแล้วยืนยันให้เอง เทสต์เดิมจึงไม่ต้องแก้ (AC-V10) ผู้ใช้ที่ยังไม่ยืนยันสร้างด้วย `registerUnverified()`
+
+| AC | เทสต์ | ชนิด | ไฟล์ |
+|---|---|---|---|
+| V1-V7 | ชื่อขึ้นต้นด้วย `AC-V<n>:` | contract | `contract/test/verify-email.test.ts` |
+| V8 | route ทดสอบไม่มีเมื่อไม่ตั้ง `MAIL_MODE` | unit + smoke หลัง deploy | `backend-a/src/mail.rs`, `backend-b/internal/mail/mail_test.go`, `curl` ตาม `docs/deploy.md` |
+| V9 | ตาราง `email_tokens` มี `token_hash` ไม่มีคอลัมน์ token แบบ plain text และค่าที่เก็บยาว 64 ตัว hex | integration | `backend-a/tests/schema.rs`, `backend-b/internal/db/schema_test.go` |
+| V10 | contract ชุดเดิมทั้งหมด | contract | `contract/test/*.test.ts` |
+| V11, R (หน้าเว็บ), Q1-Q2 | ชื่อขึ้นต้นด้วย `AC-V11`, `AC-R web`, `AC-Q<n>` | e2e | `e2e/tests/addons.spec.ts` |
+| V12 | ตะวันสมัครบน production ด้วยอีเมลของบัญชี Resend | มือ | บันทึกผลในตารางผลตรวจ |
+| R1-R7 | ชื่อขึ้นต้นด้วย `AC-R<n>:` | contract | `contract/test/password-reset.test.ts` |
+
+OWASP ที่เพิ่ม:
+| หมวด | เคส | เทสต์ |
+|---|---|---|
+| A01 | token ของบัญชี A ใช้กับบัญชี B ไม่ได้ (token ผูก user id), ผู้ใช้ที่ยังไม่ยืนยันเขียนลิงก์ไม่ได้ | `AC-V4`, `A01: a token only verifies its own account` |
+| A02 | route `/api/test/mail` ไม่มีบน production | AC-V8 |
+| A04 | token เก็บแค่ SHA-256 | AC-V9 |
+| A06 | ส่งอีเมลซ้ำ 3 ครั้งต่อชั่วโมง, ลืมรหัสผ่าน 3 ครั้งต่อชั่วโมงต่อ email, ยืนยันด้วย POST ไม่ใช่ GET | AC-V5, AC-R5, `A06: GET on verify-email does not verify` |
+| A07 | token ใช้ครั้งเดียว หมดอายุ 30 นาที, รีเซ็ตแล้ว session เดิมใช้ไม่ได้, token ยืนยันใช้รีเซ็ตรหัสไม่ได้ | AC-V3, AC-R3, AC-R4 |
+| A07 enumeration | ลืมรหัสผ่านตอบเหมือนกันทั้ง email ที่มีและไม่มี | AC-R1 |
+| A09 | log การส่งอีเมลไม่มี token หรือ URL ยืนยัน | unit test ของ logger ในแต่ละ backend |
+| Host header injection | ส่ง `Host` หรือ `X-Forwarded-Host` ปลอมตอนสมัคร ลิงก์ในอีเมลยังขึ้นต้นด้วย `APP_ORIGIN` | `A05: email links use APP_ORIGIN` |
+
+นอก OWASP:
+| เคส | เทสต์ |
+|---|---|
+| Concurrency | AC-V7 ยืนยันพร้อมกันสำเร็จครั้งเดียว (`UPDATE ... WHERE used_at IS NULL` แล้วนับแถว) และ `concurrency: two resets with one token succeed once` |
+| Idempotency | ยืนยันแล้วขอส่งซ้ำได้ 204 ไม่มีอีเมลเพิ่ม (`idempotency: resend after verify sends nothing`), ส่ง Resend ด้วย `Idempotency-Key` |
+| ส่งอีเมลล้มเหลว | unit test ของ Mailer: Resend ตอบ 500 หรือ 429 แล้ว register ยังได้ 201 |

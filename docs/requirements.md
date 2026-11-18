@@ -1,6 +1,6 @@
 # PRD-lite: pilot-shortlink
 
-วันที่: 2026-11-17 | ระดับ: 2 | ผู้ทำ: Claude Code (ขั้น 0 ของ `web-build-workflow`) | สถานะ: ตะวันยืนยันแล้ว 2026-11-17
+วันที่: 2026-11-17 | ระดับ: 2 | ผู้ทำ: Claude Code (ขั้น 0 ของ `web-build-workflow`) | สถานะ: ตะวันยืนยันแล้ว 2026-11-17, เพิ่มยืนยัน email ลืมรหัสผ่าน และ QR 2026-11-19
 
 ## 1. Problem
 งานนี้มีสองเป้าหมาย: (1) ทดสอบ `web-build-workflow` ตั้งแต่ขั้น 0 ถึง deploy จริงด้วย stack สอง profile (2) ได้แอปย่อลิงก์ที่ตะวันใช้ได้จริง เช่นลิงก์ portfolio หรือ CV ที่อยากรู้ว่ามีคนเปิดจากที่ไหน
@@ -29,8 +29,10 @@ P1
 7. แก้ปลายทางของลิงก์
 8. ปุ่มคัดลอกลิงก์สั้น
 
-P2 (ไม่ทำใน pilot)
-9. QR code, ลืมรหัสผ่าน, ยืนยัน email
+P1 รอบเพิ่มระบบเสริม (ตะวันสั่ง 2026-11-19, plan `pilot-addons` ใน TAWAN-OS)
+9. ยืนยัน email หลังสมัคร ก่อนยืนยันจะ login และดูลิงก์เดิมได้ แต่สร้าง แก้ หรือลบลิงก์ไม่ได้
+10. ลืมรหัสผ่าน: ขอลิงก์รีเซ็ตทางอีเมลแล้วตั้งรหัสใหม่
+11. ดาวน์โหลด QR code ของลิงก์สั้นเป็นไฟล์ SVG
 
 ## 4. Requirements
 - **URL ปลายทาง:** รับเฉพาะ `http` และ `https`, ยาวไม่เกิน 2048 ตัวอักษร, ปฏิเสธ URL ที่ชี้กลับมาที่โดเมนของแอปเอง (กัน redirect วน)
@@ -41,6 +43,11 @@ P2 (ไม่ทำใน pilot)
 - **Auth:** รหัสผ่านเก็บแบบ hash (Argon2id), ยาวอย่างน้อย 10 ตัว, session เป็น cookie `HttpOnly; Secure; SameSite=Lax` หมดอายุ 7 วัน, logout ทำให้ session ใช้ไม่ได้ทันที, request ที่เปลี่ยนข้อมูลต้องตรวจ header `Origin`
 - **สิทธิ์:** ผู้ใช้เห็น แก้ ลบ และดูสถิติได้เฉพาะลิงก์ของตัวเอง ลิงก์ของคนอื่นตอบ 404 (ไม่บอกว่ามีอยู่)
 - **Rate limit:** สร้างลิงก์ไม่เกิน 30 ครั้งต่อนาทีต่อบัญชี, login ผิดไม่เกิน 5 ครั้งต่อ 15 นาทีต่อ email
+- **Token ในอีเมล (ยืนยัน email และรีเซ็ตรหัสผ่าน):** สุ่ม 32 byte จาก CSPRNG, ฐานข้อมูลเก็บแค่ SHA-256, หมดอายุ 30 นาที, ใช้ได้ครั้งเดียว, ขอ token ใหม่แล้ว token เก่าของจุดประสงค์เดียวกันใช้ไม่ได้, token ผิด หมดอายุ หรือใช้แล้วได้ 400 `token_invalid` ข้อความเดียวกัน, ลิงก์ในอีเมลสร้างจาก `APP_ORIGIN` ใน config ไม่ใช่ header ของ request, หน้าเว็บส่ง token ด้วย POST (ไม่ยืนยันด้วย GET เพราะตัวสแกนลิงก์ในกล่องจดหมายจะเปิดลิงก์เอง), log ห้ามมี token
+- **ยืนยัน email:** สมัครแล้วส่งอีเมลยืนยันทันที, ผู้ใช้ที่ยังไม่ยืนยันเรียก endpoint ที่สร้าง แก้ หรือลบลิงก์ได้ 403 `email_unverified`, ขอส่งซ้ำได้ไม่เกิน 3 ครั้งต่อชั่วโมงต่อบัญชี, ยืนยันแล้วขอส่งซ้ำได้ 204 โดยไม่ส่งอีเมล, บัญชีที่มีอยู่ก่อนงานนี้ถือว่ายืนยันแล้ว
+- **ลืมรหัสผ่าน:** หน้าขอลิงก์ตอบ 204 ข้อความเดียวกันไม่ว่ามี email นั้นหรือไม่, ขอได้ไม่เกิน 3 ครั้งต่อชั่วโมงต่อ email, ตั้งรหัสใหม่แล้วลบ session ทั้งหมดของบัญชีนั้น, รีเซ็ตสำเร็จถือว่ายืนยัน email แล้ว (เพราะพิสูจน์ว่าเข้ากล่องจดหมายได้)
+- **ส่งอีเมล:** ผ่าน Resend ส่งเบื้องหลังหลังบันทึกข้อมูลแล้ว, Resend ล่มแล้วการสมัครหรือการขอลิงก์ยังสำเร็จ (ผู้ใช้กดส่งใหม่ได้), ใช้ header `Idempotency-Key`
+- **QR:** สร้างในเบราว์เซอร์จาก URL ลิงก์สั้น ไม่ต้องมี endpoint ใหม่ ดาวน์โหลดเป็น SVG ชื่อ `<code>.svg`
 - **ภาษา UI:** ไทย
 
 ## 5. UX notes
@@ -51,16 +58,17 @@ P2 (ไม่ทำใน pilot)
 
 ## 6. Constraints
 - frontend, ดีไซน์ และ OpenAPI ใช้ร่วมกันระหว่าง A และ B ต่างกันแค่ backend และ host
-- free tier เท่านั้น: Workers Free + D1, Render Free + Neon Free
+- free tier เท่านั้น: Workers Free + D1, Render Free + Neon Free, Resend Free (3,000 ฉบับต่อเดือน, 100 ฉบับต่อวัน)
+- ไม่ซื้อโดเมน (ตะวันเลือก 2026-11-19): ผู้ส่งเป็น `onboarding@resend.dev` ซึ่ง Resend ส่งได้แค่ถึงอีเมลของเจ้าของบัญชี Resend ผู้ใช้คนอื่นบน production สมัครได้แต่จะไม่ได้รับอีเมล จนกว่าจะมีโดเมนที่ยืนยันกับ Resend แล้ว
+- เทสต์อัตโนมัติไม่เรียก Resend จริง ใช้ adapter `capture` ที่เปิดด้วย `MAIL_MODE=capture` เท่านั้น
 - โปรเจกต์อยู่ที่ `D:\TAWAN-OS\pilot-shortlink\` นอก Obsidian vault
 - ไม่เดาแทนตะวันเรื่องบัญชีและ login ของ Cloudflare, Render, Neon, GitHub
 
 ## 7. Out of scope
-ทีมหรือการแชร์ลิงก์, custom domain, QR, วันหมดอายุของลิงก์, สถิติประเทศหรืออุปกรณ์, ลืมรหัสผ่าน, ยืนยัน email, การชำระเงิน
+ทีมหรือการแชร์ลิงก์, custom domain, วันหมดอายุของลิงก์, สถิติประเทศหรืออุปกรณ์, การชำระเงิน, เปลี่ยน email, ลบบัญชี, outbox และ retry การส่งอีเมลอัตโนมัติ, login ด้วย Google หรือ GitHub, Turnstile
 
 ## 8. Assumptions และ open questions
 - ใช้โดเมน `*.workers.dev` (A) และ `*.onrender.com` (B) ไม่ซื้อโดเมน
-- ข้อจำกัดที่รู้แล้ว: ไม่มีลืมรหัสผ่าน ผู้ใช้ที่ลืมรหัสต้องสมัครใหม่ ยอมรับได้สำหรับ pilot
 - Open: board Trello อยู่ใน workspace "Animation" ไปก่อน
 
 ## 9. Acceptance criteria
@@ -76,3 +84,30 @@ P2 (ไม่ทำใน pilot)
 10. Given logout แล้ว When ใช้ cookie เดิมเรียก API Then ได้ 401
 11. Given ส่งคำขอสร้างลิงก์ 31 ครั้งในนาทีเดียว When ครั้งที่ 31 Then ได้ 429
 12. Given A และ B deploy แล้ว When รัน e2e ชุดเดียวกันกับทั้งสอง URL Then ผ่านทั้งคู่
+
+ยืนยัน email
+- AC-V1 Given สมัครใหม่ When เรียก `GET /api/me` Then `emailVerified: false` และมีอีเมลยืนยัน 1 ฉบับถึง email นั้น
+- AC-V2 Given token จากอีเมล When `POST /api/auth/verify-email` Then 204 และ `emailVerified: true`
+- AC-V3 Given token ที่ใช้แล้ว หมดอายุ หรือผิดรูปแบบ When ยืนยัน Then 400 `token_invalid`
+- AC-V4 Given ยังไม่ยืนยัน When สร้าง แก้ หรือลบลิงก์ Then 403 `email_unverified`
+- AC-V5 Given ขอส่งซ้ำ 3 ครั้งในชั่วโมงเดียว When ขอครั้งที่ 4 Then 429
+- AC-V6 Given ขอส่งซ้ำแล้ว When ใช้ token ฉบับก่อน Then 400 `token_invalid`
+- AC-V7 Given token เดียวกัน When ยืนยันพร้อมกัน 2 request Then 204 หนึ่งครั้ง 400 หนึ่งครั้ง
+- AC-V8 Given ไม่ได้ตั้ง `MAIL_MODE=capture` When เรียก `/api/test/mail` Then 404
+- AC-V9 Given ตาราง token ในฐานข้อมูล When ตรวจหลังเทสต์ Then ไม่มี token แบบ plain text
+- AC-V10 Given เทสต์ AC 1-12 เดิม When รันกับระบบที่มีการยืนยัน email Then ผ่านทั้งหมด
+- AC-V11 Given สมัครผ่านหน้าเว็บ When เปิดลิงก์ในอีเมล Then เห็นหน้ายืนยันสำเร็จ และแถบเตือนหายไป
+- AC-V12 Given production When ตะวันสมัครด้วยอีเมลของบัญชี Resend Then ได้อีเมลจริงและกดยืนยันผ่าน
+
+ลืมรหัสผ่าน
+- AC-R1 Given email ที่มีและไม่มีในระบบ When `POST /api/auth/password/forgot` Then 204 ทั้งคู่ และมีอีเมลส่งออกเฉพาะ email ที่มีบัญชี
+- AC-R2 Given token รีเซ็ต When `POST /api/auth/password/reset` ด้วยรหัสใหม่ 10 ตัวขึ้นไป Then 204, login ด้วยรหัสใหม่ได้ รหัสเดิมไม่ได้
+- AC-R3 Given login ค้างไว้ 2 session When รีเซ็ตสำเร็จ Then cookie เดิมทั้งสองได้ 401
+- AC-R4 Given token รีเซ็ตที่ใช้แล้วหรือหมดอายุ, หรือ token ยืนยัน email When รีเซ็ต Then 400 `token_invalid`
+- AC-R5 Given ขอลิงก์ 3 ครั้งในชั่วโมงเดียว When ขอครั้งที่ 4 ด้วย email เดิม Then 429
+- AC-R6 Given บัญชีที่ยังไม่ยืนยัน email When รีเซ็ตสำเร็จ Then `emailVerified: true`
+- AC-R7 Given รหัสใหม่สั้นกว่า 10 ตัว When รีเซ็ต Then 422 และ token ยังใช้ได้
+
+QR
+- AC-Q1 Given ลิงก์ในรายการ When กดดาวน์โหลด QR Then ได้ไฟล์ `<code>.svg` และถอดรหัส QR แล้วได้ URL ลิงก์สั้นตรงทุกตัวอักษร
+- AC-Q2 Given ใช้คีย์บอร์ดอย่างเดียว When Tab ไปที่ปุ่ม QR แล้วกด Enter Then ดาวน์โหลดได้ และปุ่มมีชื่อที่ screen reader อ่านได้
