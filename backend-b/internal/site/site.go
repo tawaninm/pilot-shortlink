@@ -22,6 +22,7 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self' https://fon
 func HTMLHeaders(h http.Header) {
 	h.Set("Content-Security-Policy", CSP)
 	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 }
 
 // Site holds the app shell and the hashed assets.

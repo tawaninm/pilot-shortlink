@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	sessionCookie  = "session"
+	sessionCookie  = "__Host-session" // __Host-: HTTPS only, Path=/, no Domain (S7 security review)
 	sessionTTL     = 7 * 24 * time.Hour
 	loginWindow    = 15 * time.Minute
 	loginMaxFailed = 5
@@ -182,6 +182,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		if err := s.q.DeleteSession(r.Context(), auth.HashToken(c.Value)); err != nil {
 			s.fail(w, err)

@@ -36,6 +36,7 @@ func (s *server) requireOrigin(next http.Handler) http.Handler {
 // requireSession answers 401 unless the session cookie maps to an unexpired session.
 func (s *server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store") // per-user data must not be cached (S7 security review)
 		c, err := r.Cookie(sessionCookie)
 		if err != nil {
 			writeProblem(w, http.StatusUnauthorized, "unauthorized", "")
