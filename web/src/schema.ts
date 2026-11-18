@@ -554,7 +554,7 @@ export interface components {
     };
     requestBodies: never;
     headers: {
-        /** @description session=<token สุ่ม 32 byte base64url>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800 */
+        /** @description __Host-session=<token สุ่ม 32 byte base64url>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800 */
         SessionCookie: string;
     };
     pathItems: never;

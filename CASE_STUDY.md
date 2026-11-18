@@ -88,6 +88,6 @@
 - **ตั้ง region ให้ตรงกับฐานข้อมูลตั้งแต่ต้น:** Blueprint ที่ไม่ระบุ region จะไป Oregon ขณะที่ Neon อยู่ Singapore และเปลี่ยน region หลังสร้างไม่ได้
 - **build image ของ production ใน CI ด้วย:** `go mod download` ใน Dockerfile โหลด module ของเทสต์ไปด้วยจน build บน Render ล้ม ในเครื่องไม่เจอเพราะมี cache
 - **เครื่องเดียวรัน Docker, wrangler และ agent หลายตัวพร้อมกันไม่ไหว:** memory ต่ำ และ Docker หยุดเองหลายครั้ง
-- **ช่องโหว่ของ skill 24 ข้อ:** นำกลับไปแก้ `web-build-workflow` ใน TAWAN-OS แล้ว (commit ce1b110c) สรุปอยู่ที่ `docs/specs/pilot_shortlink.md` ของ TAWAN-OS
+- **ช่องโหว่ของ skill 24 ข้อ:** นำกลับไปแก้ `web-build-workflow` ใน TAWAN-OS แล้ว (commit ce1b110c) สรุปอยู่ที่ `docs/specs/pilot-shortlink.md` ของ TAWAN-OS
 
 ภาพหน้าจอ: `docs/screenshots/` (desktop, มือถือ 320px, dark mode)
