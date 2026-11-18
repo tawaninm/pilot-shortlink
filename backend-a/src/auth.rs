@@ -7,7 +7,7 @@ use worker::*;
 
 use crate::http::{
     json_response_with_headers, now_ms, now_sec, problem_field_response, problem_response,
-    rate_limited_response,
+    rate_limited_response, read_json_body,
 };
 use crate::session::{
     authenticate_session, clear_session_cookie_header, create_session, delete_session,
@@ -131,19 +131,7 @@ pub fn login_window(now_sec: i64) -> (i64, i64) {
     (window_start, retry_after)
 }
 
-async fn is_login_rate_limited(db: &D1Database, key: &str, window_start: i64) -> Result<bool> {
-    let row = db
-        .prepare("SELECT count FROM rate_limits WHERE key = ?1 AND window_start = ?2")
-        .bind(&[
-            key.into(),
-            wasm_bindgen::JsValue::from_f64(window_start as f64),
-        ])?
-        .first::<CountRow>(None)
-        .await?;
-    Ok(row.is_some_and(|r| r.count >= LOGIN_MAX_FAILURES))
-}
-
-async fn record_failed_login(db: &D1Database, key: &str, window_start: i64) -> Result<i64> {
+async fn consume_login_rate_limit(db: &D1Database, key: &str, window_start: i64) -> Result<i64> {
     let row = db
         .prepare(
             "INSERT INTO rate_limits (key, window_start, count) VALUES (?1, ?2, 1) \
@@ -166,12 +154,23 @@ async fn record_failed_login(db: &D1Database, key: &str, window_start: i64) -> R
     Ok(row.map_or(1, |r| r.count))
 }
 
+async fn clear_login_rate_limit(db: &D1Database, key: &str) -> Result<()> {
+    db.prepare("DELETE FROM rate_limits WHERE key = ?1")
+        .bind(&[key.into()])?
+        .run()
+        .await?;
+    Ok(())
+}
+
 /// `POST /api/auth/register`
 pub async fn handle_register(
     req: &mut Request,
     db: &D1Database,
 ) -> Result<(Response, Option<u64>)> {
-    let raw_body = req.bytes().await?;
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok((res, None)),
+    };
     let Ok(creds) = serde_json::from_slice::<Credentials>(&raw_body) else {
         return Ok((
             problem_response(422, "Unprocessable Entity", "invalid_body")?,
@@ -232,7 +231,10 @@ pub async fn handle_login(
     req: &mut Request,
     db: &D1Database,
 ) -> Result<(Response, Option<u64>)> {
-    let raw_body = req.bytes().await?;
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok((res, None)),
+    };
     let Ok(creds) = serde_json::from_slice::<Credentials>(&raw_body) else {
         return Ok((
             problem_response(422, "Unprocessable Entity", "invalid_body")?,
@@ -241,12 +243,26 @@ pub async fn handle_login(
     };
 
     let email = normalize_email(&creds.email);
+    if !is_valid_email(&email) {
+        return Ok((
+            problem_field_response(422, "Unprocessable Entity", "invalid_body", "email")?,
+            None,
+        ));
+    }
+    if !is_valid_password_len(&creds.password) {
+        return Ok((
+            problem_field_response(422, "Unprocessable Entity", "weak_password", "password")?,
+            None,
+        ));
+    }
+
     let now = now_sec();
     let (window_start, retry_after) = login_window(now);
     let rate_key = format!("login:{email}");
 
-    // Check rate limit BEFORE hashing the password (even if the password is right).
-    if is_login_rate_limited(db, &rate_key, window_start).await? {
+    // Increment rate-limit bucket atomically FIRST; if count > 5, answer 429 without running Argon2.
+    let attempt_count = consume_login_rate_limit(db, &rate_key, window_start).await?;
+    if attempt_count > LOGIN_MAX_FAILURES {
         return Ok((rate_limited_response(retry_after)?, None));
     }
 
@@ -263,6 +279,7 @@ pub async fn handle_login(
 
     match (user, password_ok) {
         (Some(u), true) => {
+            clear_login_rate_limit(db, &rate_key).await?;
             let token = create_session(db, u.id, now).await?;
             let cookie = session_cookie_header(&token);
             let body = serde_json::to_string(&MeResponse { email: &u.email })?;
@@ -275,7 +292,6 @@ pub async fn handle_login(
             Ok((res, Some(hash_ms)))
         }
         _ => {
-            let _ = record_failed_login(db, &rate_key, window_start).await?;
             let res = problem_response(401, "Unauthorized", "unauthorized")?;
             Ok((res, Some(hash_ms)))
         }

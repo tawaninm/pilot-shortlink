@@ -4,8 +4,116 @@ use worker::*;
 /// Content-Security-Policy applied to every HTML response (OWASP A02).
 pub const HTML_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
-/// Referrer-Policy applied to every HTML response (OWASP A02).
+///Referrer-Policy applied to every HTML response (OWASP A02).
 pub const HTML_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
+
+/// Maximum allowed JSON request body size in bytes (16 KiB).
+pub const MAX_JSON_BODY_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyReadError {
+    TooLarge,
+}
+
+/// Checks an optional `Content-Length` header value against `max_bytes`.
+/// Returns `Err(BodyReadError::TooLarge)` if `Content-Length` is a numeric value exceeding `max_bytes`.
+pub fn check_content_length(
+    content_length: Option<&str>,
+    max_bytes: usize,
+) -> std::result::Result<(), BodyReadError> {
+    let Some(raw) = content_length.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    if let Ok(len) = raw.parse::<u64>() {
+        if len > max_bytes as u64 {
+            return Err(BodyReadError::TooLarge);
+        }
+    } else if raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(BodyReadError::TooLarge);
+    }
+    Ok(())
+}
+
+/// Appends `chunk` to `buf` if the resulting length is at most `max_bytes`,
+/// or returns `Err(BodyReadError::TooLarge)` without growing `buf` past `max_bytes`.
+pub fn append_bounded_chunk(
+    buf: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+) -> std::result::Result<(), BodyReadError> {
+    if buf.len().saturating_add(chunk.len()) > max_bytes {
+        return Err(BodyReadError::TooLarge);
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Validates `content_length` first and then accumulates `chunks` up to `max_bytes`.
+pub fn collect_bounded_chunks<'a, I>(
+    content_length: Option<&str>,
+    chunks: I,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, BodyReadError>
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    check_content_length(content_length, max_bytes)?;
+    let mut buf = Vec::new();
+    for chunk in chunks {
+        append_bounded_chunk(&mut buf, chunk, max_bytes)?;
+    }
+    Ok(buf)
+}
+
+/// Reads the request body up to `max_bytes`, checking `Content-Length` first and capping
+/// the bytes actually read from the stream.
+pub async fn read_bounded_body(
+    req: &mut Request,
+    max_bytes: usize,
+) -> Result<std::result::Result<Vec<u8>, BodyReadError>> {
+    let content_length = req.headers().get("Content-Length")?;
+    if let Err(err) = check_content_length(content_length.as_deref(), max_bytes) {
+        return Ok(Err(err));
+    }
+
+    let Some(stream) = req.inner().body() else {
+        return Ok(Ok(Vec::new()));
+    };
+
+    let reader = web_sys::ReadableStreamDefaultReader::new(&stream)?;
+    let mut buf = Vec::new();
+
+    loop {
+        let step = wasm_bindgen_futures::JsFuture::from(reader.read()).await?;
+        let done = js_sys::Reflect::get(&step, &"done".into())?
+            .as_bool()
+            .unwrap_or(false);
+        if done {
+            break;
+        }
+        let value = js_sys::Reflect::get(&step, &"value".into())?;
+        if !value.is_undefined() && !value.is_null() {
+            let chunk = js_sys::Uint8Array::new(&value).to_vec();
+            if let Err(err) = append_bounded_chunk(&mut buf, &chunk, max_bytes) {
+                let _ = reader.cancel();
+                return Ok(Err(err));
+            }
+        }
+    }
+
+    Ok(Ok(buf))
+}
+
+/// Reads a JSON request body capped at `MAX_JSON_BODY_BYTES` (16 KiB), returning a
+/// `413 Payload Too Large` `application/problem+json` (`code: "invalid_body"`) response if exceeded.
+pub async fn read_json_body(req: &mut Request) -> Result<std::result::Result<Vec<u8>, Response>> {
+    match read_bounded_body(req, MAX_JSON_BODY_BYTES).await? {
+        Ok(bytes) => Ok(Ok(bytes)),
+        Err(BodyReadError::TooLarge) => {
+            Ok(Err(problem_response(413, "Payload Too Large", "invalid_body")?))
+        }
+    }
+}
 
 /// Returns true if a `Content-Type` header value represents an HTML document (`text/html`).
 pub fn is_html_content_type(content_type: &str) -> bool {
@@ -202,5 +310,58 @@ mod tests {
         assert!(HTML_CSP.contains("frame-ancestors 'none'"));
         assert!(!HTML_CSP.contains("'unsafe-eval'"));
         assert_eq!(HTML_REFERRER_POLICY, "strict-origin-when-cross-origin");
+    }
+
+    #[test]
+    fn body_cap_checks_content_length_and_stream_bytes_at_16_kib() {
+        assert_eq!(MAX_JSON_BODY_BYTES, 16 * 1024);
+
+        // Missing or exact 16 KiB Content-Length passes
+        assert_eq!(check_content_length(None, MAX_JSON_BODY_BYTES), Ok(()));
+        assert_eq!(check_content_length(Some(""), MAX_JSON_BODY_BYTES), Ok(()));
+        assert_eq!(
+            check_content_length(Some("16384"), MAX_JSON_BODY_BYTES),
+            Ok(())
+        );
+
+        // Over 16 KiB Content-Length is rejected before reading stream
+        assert_eq!(
+            check_content_length(Some("16385"), MAX_JSON_BODY_BYTES),
+            Err(BodyReadError::TooLarge)
+        );
+        assert_eq!(
+            check_content_length(Some(" 65536 "), MAX_JSON_BODY_BYTES),
+            Err(BodyReadError::TooLarge)
+        );
+        assert_eq!(
+            check_content_length(Some("999999999999999999999999999999"), MAX_JSON_BODY_BYTES),
+            Err(BodyReadError::TooLarge)
+        );
+
+        // Content-Length over limit fails even if chunks are empty
+        assert_eq!(
+            collect_bounded_chunks(Some("16385"), [b"{}".as_slice()], MAX_JSON_BODY_BYTES),
+            Err(BodyReadError::TooLarge)
+        );
+
+        // Stream cap allows up to 16 KiB across multiple chunks
+        let chunk_8k = vec![b'a'; 8 * 1024];
+        let exact_16k = collect_bounded_chunks(
+            None,
+            [chunk_8k.as_slice(), chunk_8k.as_slice()],
+            MAX_JSON_BODY_BYTES,
+        )
+        .expect("16 KiB body must be allowed");
+        assert_eq!(exact_16k.len(), MAX_JSON_BODY_BYTES);
+
+        // Stream cap rejects when actual bytes exceed 16 KiB even if Content-Length is missing or lies
+        assert_eq!(
+            collect_bounded_chunks(
+                Some("10"),
+                [chunk_8k.as_slice(), chunk_8k.as_slice(), b"x".as_slice()],
+                MAX_JSON_BODY_BYTES,
+            ),
+            Err(BodyReadError::TooLarge)
+        );
     }
 }

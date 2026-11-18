@@ -3,7 +3,7 @@ use worker::*;
 
 use crate::http::{
     json_response, json_response_with_headers, now_sec, problem_field_response, problem_response,
-    rate_limited_response,
+    rate_limited_response, read_json_body,
 };
 use crate::session::authenticate_session;
 
@@ -162,14 +162,21 @@ struct TotalClicksRow {
     clicks_total: i64,
 }
 
+/// Trims at most one trailing `.` from a host string so FQDN notation
+/// (e.g. `localhost.` vs `localhost`) is compared on an equal footing.
+pub fn trim_trailing_dot(host: &str) -> &str {
+    host.strip_suffix('.').unwrap_or(host)
+}
+
 /// Validates a target URL against `docs/requirements.md` section 4 and `api/openapi.yaml`:
 /// - Non-empty, at most 2048 chars, no whitespace or control characters.
 /// - Parses as an absolute `http` or `https` URL with a non-empty host.
-/// - Host does not match `app_origin`'s host (case-insensitive).
+/// - Host does not match `app_origin`'s host after trimming one trailing `.` (case-insensitive).
+/// - Returns the parsed `Url` serialization (`as_str()`, percent-encoded ASCII) so `Location` is always ASCII.
 pub fn validate_target_url(
     raw_url: &str,
     app_origin: &str,
-) -> std::result::Result<(), UrlValidationError> {
+) -> std::result::Result<String, UrlValidationError> {
     if raw_url.is_empty()
         || raw_url.len() > MAX_URL_LEN
         || raw_url.chars().count() > MAX_URL_LEN
@@ -186,19 +193,23 @@ pub fn validate_target_url(
         return Err(UrlValidationError::InvalidUrl);
     }
 
-    let Some(target_host) = parsed.host_str().filter(|h| !h.is_empty()) else {
+    let Some(target_host) = parsed
+        .host_str()
+        .map(trim_trailing_dot)
+        .filter(|h| !h.is_empty())
+    else {
         return Err(UrlValidationError::InvalidUrl);
     };
 
     if let Ok(origin_url) = Url::parse(app_origin) {
-        if let Some(origin_host) = origin_url.host_str() {
+        if let Some(origin_host) = origin_url.host_str().map(trim_trailing_dot) {
             if target_host.eq_ignore_ascii_case(origin_host) {
                 return Err(UrlValidationError::SelfLink);
             }
         }
     }
 
-    Ok(())
+    Ok(parsed.as_str().to_string())
 }
 
 /// Checks whether a lowercase alias is one of the reserved words (`docs/requirements.md` section 4).
@@ -382,6 +393,11 @@ pub async fn handle_create_link(
     db: &D1Database,
     app_origin: &str,
 ) -> Result<Response> {
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok(res),
+    };
+
     let now = now_sec();
     let Some(user) = authenticate_session(req, db, now).await? else {
         return problem_response(401, "Unauthorized", "unauthorized");
@@ -391,21 +407,21 @@ pub async fn handle_create_link(
         return rate_limited_response(retry_after);
     }
 
-    let raw_body = req.bytes().await?;
     let Ok(payload) = serde_json::from_slice::<CreateLinkRequest>(&raw_body) else {
         return problem_response(422, "Unprocessable Entity", "invalid_body");
     };
 
-    if let Err(err) = validate_target_url(&payload.url, app_origin) {
-        return url_error_response(err);
-    }
+    let normalized_url = match validate_target_url(&payload.url, app_origin) {
+        Ok(u) => u,
+        Err(err) => return url_error_response(err),
+    };
 
     let inserted = if let Some(raw_alias) = payload.alias.as_deref() {
         let code = match validate_alias(raw_alias) {
             Ok(c) => c,
             Err(err) => return alias_error_response(err),
         };
-        let Some(row) = try_insert_link(db, user.id, &code, &payload.url).await? else {
+        let Some(row) = try_insert_link(db, user.id, &code, &normalized_url).await? else {
             return problem_field_response(409, "Conflict", "alias_taken", "alias");
         };
         row
@@ -413,7 +429,7 @@ pub async fn handle_create_link(
         let mut created = None;
         for _ in 0..MAX_CODE_RETRIES {
             let code = generate_random_code().map_err(Error::RustError)?;
-            if let Some(row) = try_insert_link(db, user.id, &code, &payload.url).await? {
+            if let Some(row) = try_insert_link(db, user.id, &code, &normalized_url).await? {
                 created = Some(row);
                 break;
             }
@@ -556,19 +572,24 @@ pub async fn handle_patch_link(
     app_origin: &str,
     raw_code: &str,
 ) -> Result<Response> {
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok(res),
+    };
+
     let now = now_sec();
     let Some(user) = authenticate_session(req, db, now).await? else {
         return problem_response(401, "Unauthorized", "unauthorized");
     };
 
-    let raw_body = req.bytes().await?;
     let Ok(payload) = serde_json::from_slice::<PatchLinkRequest>(&raw_body) else {
         return problem_response(422, "Unprocessable Entity", "invalid_body");
     };
 
-    if let Err(err) = validate_target_url(&payload.url, app_origin) {
-        return url_error_response(err);
-    }
+    let normalized_url = match validate_target_url(&payload.url, app_origin) {
+        Ok(u) => u,
+        Err(err) => return url_error_response(err),
+    };
 
     let lower_code = raw_code.to_ascii_lowercase();
     let updated = db
@@ -578,7 +599,7 @@ pub async fn handle_patch_link(
              RETURNING id, code, url, created_at",
         )
         .bind(&[
-            payload.url.as_str().into(),
+            normalized_url.as_str().into(),
             lower_code.as_str().into(),
             wasm_bindgen::JsValue::from_f64(user.id as f64),
         ])?
@@ -761,12 +782,18 @@ mod tests {
         let origin = "http://localhost:8787";
         assert_eq!(
             validate_target_url("https://example.com/portfolio?ref=cv", origin),
-            Ok(())
+            Ok("https://example.com/portfolio?ref=cv".to_string())
         );
         assert_eq!(
             validate_target_url("http://example.org:8080/a/b", origin),
-            Ok(())
+            Ok("http://example.org:8080/a/b".to_string())
         );
+
+        // Non-ASCII target URL is percent-encoded into ASCII
+        let encoded = validate_target_url("https://example.com/ไทย?q=ลิงก์", origin)
+            .expect("Thai URL must be valid");
+        assert!(encoded.is_ascii(), "serialized URL must be ASCII: {encoded}");
+        assert!(encoded.starts_with("https://example.com/%E0%B9%84"));
 
         // Schemes other than http/https and malformed URLs -> InvalidUrl
         for bad in [
@@ -788,7 +815,7 @@ mod tests {
         // Max length 2048
         let max_ok = format!("https://example.com/{}", "a".repeat(2048 - 20));
         assert_eq!(max_ok.len(), 2048);
-        assert_eq!(validate_target_url(&max_ok, origin), Ok(()));
+        assert_eq!(validate_target_url(&max_ok, origin), Ok(max_ok));
 
         let too_long = format!("https://example.com/{}", "a".repeat(2048));
         assert_eq!(
@@ -803,6 +830,27 @@ mod tests {
         );
         assert_eq!(
             validate_target_url("https://LOCALHOST/abc1234", origin),
+            Err(UrlValidationError::SelfLink)
+        );
+    }
+
+    #[test]
+    fn host_trailing_dot_trim_detects_self_links() {
+        assert_eq!(trim_trailing_dot("localhost."), "localhost");
+        assert_eq!(trim_trailing_dot("localhost"), "localhost");
+        assert_eq!(trim_trailing_dot("example.com.."), "example.com.");
+
+        let origin = "http://localhost:8787";
+        assert_eq!(
+            validate_target_url("http://localhost.:8787/abc1234", origin),
+            Err(UrlValidationError::SelfLink)
+        );
+        assert_eq!(
+            validate_target_url("https://LOCALHOST./abc1234", origin),
+            Err(UrlValidationError::SelfLink)
+        );
+        assert_eq!(
+            validate_target_url("http://localhost/abc1234", "http://localhost.:8787"),
             Err(UrlValidationError::SelfLink)
         );
     }
