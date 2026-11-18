@@ -121,3 +121,7 @@ OWASP ที่เพิ่ม:
 | Concurrency | AC-V7 ยืนยันพร้อมกันสำเร็จครั้งเดียว (`UPDATE ... WHERE used_at IS NULL` แล้วนับแถว) และ `concurrency: two resets with one token succeed once` |
 | Idempotency | ยืนยันแล้วขอส่งซ้ำได้ 204 ไม่มีอีเมลเพิ่ม (`idempotency: resend after verify sends nothing`), ส่ง Resend ด้วย `Idempotency-Key` |
 | ส่งอีเมลล้มเหลว | unit test ของ Mailer: Resend ตอบ 500 หรือ 429 แล้ว register ยังได้ 201 |
+
+ผลกับ AC12: helper `register()` ของ e2e ยืนยัน email ผ่าน capture จึงรัน e2e ชุดเต็มได้เฉพาะเมื่อ backend เปิด `MAIL_MODE=capture` (`verify.py e2e-a` / `e2e-b`) ไม่ใช่กับ URL production อีกต่อไป หลัง deploy ใช้ smoke check แทน: `/api/test/mail` ได้ 404 (AC-V8), ตะวันสมัครด้วยอีเมลจริง (AC-V12) และสแกน QR ด้วยมือถือ
+QR ใน e2e ถอดรหัสจริงด้วย `jsqr` 1.4.0 (devDependency ของ `e2e` เท่านั้น ไม่เข้า bundle) เพราะ AC-Q1 ต้องการ URL ตรงทุกตัวอักษร การตรวจแค่ว่าไฟล์มี `<svg` พิสูจน์ข้อนี้ไม่ได้
+สถานะ red (2026-11-19, backend A): contract ใหม่ 26/26 fail ด้วย 404 หรือ field ไม่มี, e2e `addons.spec.ts` 12/12 fail เพราะไม่มีแถบเตือนและ route capture
