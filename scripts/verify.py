@@ -114,7 +114,8 @@ def backend_a(filters: list[str], tests=None) -> None:
     run("cargo test", ["cargo", "test"], cwd=a)
     run("migrate", [*WRANGLER, "d1", "migrations", "apply", "DB", "--local"], cwd=a)
     url = "http://localhost:8787"
-    server = start([*WRANGLER, "dev", "--port", "8787"], cwd=a)
+    # MAIL_MODE=capture only on the command line, never in wrangler.toml, so it cannot reach production (AC-V8)
+    server = start([*WRANGLER, "dev", "--port", "8787", "--var", "MAIL_MODE:capture"], cwd=a)
     try:
         wait_healthy(url, server)
         (tests or contract)(url, filters)
@@ -139,7 +140,7 @@ def backend_b(filters: list[str], tests=None) -> None:
                      "-p", "55432:5432", PG_IMAGE])
     url = "http://localhost:8080"
     env = {**os.environ, "DATABASE_URL": "postgres://postgres:verify@localhost:55432/postgres?sslmode=disable",
-           "APP_ORIGIN": url, "PORT": "8080"}
+           "APP_ORIGIN": url, "PORT": "8080", "MAIL_MODE": "capture"}
     server = None
     try:
         for _ in range(60):  # Postgres needs a few seconds before it accepts connections

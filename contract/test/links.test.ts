@@ -39,7 +39,7 @@ describe("create link", () => {
     expect((await problem(loser.response)).code).toBe("alias_taken");
   });
 
-  it.each(["API", "admin", "Health", "openapi"])("AC5: reserved alias %s returns 422 reserved_alias", async (alias) => {
+  it.each(["API", "admin", "Health", "openapi", "verify-email", "Reset-Password", "forgot-password"])("AC5: reserved alias %s returns 422 reserved_alias", async (alias) => {
     const { api } = await registerUser();
     const { response } = await api.POST("/api/links", { body: { url: TARGET, alias } });
     expect(response.status).toBe(422);
