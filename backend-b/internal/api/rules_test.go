@@ -20,6 +20,7 @@ func TestCheckTargetURL(t *testing.T) {
 		"https://example.com/" + strings.Repeat("a", 2048): "invalid_url",
 		"https://short.example/abc1234":                    "self_link",
 		"https://SHORT.example:8443/x":                     "self_link",
+		"https://short.example./x":                         "self_link",
 	}
 	for in, want := range cases {
 		if got := checkTargetURL(in, app); got != want {
@@ -39,6 +40,7 @@ func TestCheckAlias(t *testing.T) {
 		strings.Repeat("x", 33): {strings.Repeat("x", 33), "invalid_alias"},
 		"API":                   {"api", "reserved_alias"},
 		"Health":                {"health", "reserved_alias"},
+		"Kelvin":                {"Kelvin", "invalid_alias"},
 	}
 	for in, want := range cases {
 		alias, code := checkAlias(in)

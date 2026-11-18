@@ -28,7 +28,12 @@ func checkTargetURL(raw, appOrigin string) string {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return "invalid_url"
 	}
-	if app, err := url.Parse(appOrigin); err == nil && strings.EqualFold(u.Hostname(), app.Hostname()) {
+	// "host." is the same host to a browser, so compare without the trailing dot (S7 security review).
+	host, appHost := strings.TrimSuffix(u.Hostname(), "."), ""
+	if app, err := url.Parse(appOrigin); err == nil {
+		appHost = strings.TrimSuffix(app.Hostname(), ".")
+	}
+	if appHost != "" && strings.EqualFold(host, appHost) {
 		return "self_link" // would redirect into the app itself (loops, phishing under our name)
 	}
 	return ""
@@ -36,6 +41,12 @@ func checkTargetURL(raw, appOrigin string) string {
 
 // checkAlias lower-cases the alias and returns it with "" or the Problem code (invalid_alias or reserved_alias).
 func checkAlias(raw string) (string, string) {
+	// Check ASCII before lowercasing: Unicode folding turns e.g. the Kelvin sign into "k" (S7 security review).
+	for i := 0; i < len(raw); i++ {
+		if raw[i] >= 0x80 {
+			return raw, "invalid_alias"
+		}
+	}
 	alias := strings.ToLower(raw)
 	if len(alias) < 3 || !aliasPattern.MatchString(alias) {
 		return alias, "invalid_alias"

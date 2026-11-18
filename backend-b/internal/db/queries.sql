@@ -72,3 +72,7 @@ SELECT id, url FROM links WHERE code = $1;
 -- One atomic statement per click: concurrent visits never lose a count.
 INSERT INTO click_daily (link_id, day, referrer_host, clicks) VALUES ($1, $2, $3, 1)
 ON CONFLICT (link_id, day, referrer_host) DO UPDATE SET clicks = click_daily.clicks + 1;
+
+-- name: ResetRate :exec
+-- A successful login clears the failure count for that email (the limit counts guesses, not users).
+DELETE FROM rate_limits WHERE key = $1;

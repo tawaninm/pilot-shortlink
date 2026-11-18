@@ -12,3 +12,4 @@ backend-b/internal/site/dist/*
 !backend-b/internal/site/dist/.keep
 e2e/test-results/
 e2e/playwright-report/
+backend-b/.bin/
