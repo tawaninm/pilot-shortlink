@@ -29,7 +29,7 @@ name = "pilot-shortlink-a"
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "pilot-shortlink-a"
-database_id = "<D1_DATABASE_ID>" # [TBC] replace with the UUID output of `npx wrangler@4.163.0 d1 create pilot-shortlink-a`
+database_id = "c268b5cc-8324-4084-8325-2ea58450c665" # created 2026-11-18, region APAC
 migrations_dir = "migrations"
 
 [env.production.vars]
