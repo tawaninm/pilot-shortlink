@@ -22,6 +22,7 @@ services:
     dockerfilePath: ./backend-b/Dockerfile
     dockerContext: .
     plan: free
+    region: singapore # same region as Neon (aws-ap-southeast-1); cannot change after create
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
