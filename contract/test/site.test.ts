@@ -1,6 +1,6 @@
 // C8: the backend serves the web app on the same origin as the API (ADR-001), with security headers (OWASP A02).
 import { describe, expect, it } from "vitest";
-import { BASE_URL } from "../src/client";
+import { BASE_URL, registerUser } from "../src/client";
 
 const page = (path: string) => fetch(`${BASE_URL}${path}`, { redirect: "manual" });
 
@@ -20,6 +20,14 @@ describe("web app served by the backend", () => {
     expect(csp).not.toContain("'unsafe-eval'");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
+    expect(res.headers.get("strict-transport-security")).toMatch(/max-age=\d{7,}/); // S7 review
+  });
+
+  it("S7 review: responses that need a session are never cached", async () => {
+    const { api } = await registerUser();
+    for (const res of [(await api.GET("/api/me")).response, (await api.GET("/api/links")).response]) {
+      expect(res.headers.get("cache-control")).toContain("no-store");
+    }
   });
 
   it("built assets are served with a JavaScript content type", async () => {

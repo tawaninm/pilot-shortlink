@@ -10,12 +10,12 @@ describe("register", () => {
     const { data, response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD } });
     expect(response.status).toBe(201);
     expect(data?.email).toBe(email);
-    expect(sessionCookie(response)).toMatch(/^session=[A-Za-z0-9_-]{43}$/); // 32 random bytes, base64url
+    expect(sessionCookie(response)).toMatch(/^__Host-session=[A-Za-z0-9_-]{43}$/); // 32 random bytes, base64url
   });
 
   it("A07: session cookie is HttpOnly, Secure, SameSite=Lax, Path=/, 7 days", async () => {
     const { response } = await anon().POST("/api/auth/register", { body: { email: uniqueEmail(), password: PASSWORD } });
-    const raw = response.headers.getSetCookie().find((c) => c.startsWith("session="))!;
+    const raw = response.headers.getSetCookie().find((c) => c.startsWith("__Host-session="))!;
     const attrs = raw.split(";").map((a) => a.trim().toLowerCase());
     expect(attrs).toEqual(expect.arrayContaining(["httponly", "secure", "samesite=lax", "path=/", "max-age=604800"]));
   });
@@ -78,7 +78,7 @@ describe("session", () => {
   });
 
   it("a made-up session token returns 401", async () => {
-    const api = createClient<paths>({ baseUrl: BASE_URL, headers: { Cookie: `session=${"A".repeat(43)}` } });
+    const api = createClient<paths>({ baseUrl: BASE_URL, headers: { Cookie: `__Host-session=${"A".repeat(43)}` } });
     expect((await api.GET("/api/me")).response.status).toBe(401);
   });
 

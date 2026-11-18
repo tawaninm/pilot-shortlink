@@ -25,7 +25,7 @@ export const anon = () => createClient<paths>({ baseUrl: BASE_URL, headers: { Or
 
 /** Reads `session=<token>` from a response's Set-Cookie headers. */
 export function sessionCookie(res: Response): string | undefined {
-  const raw = res.headers.getSetCookie().find((c) => c.startsWith("session="));
+  const raw = res.headers.getSetCookie().find((c) => c.startsWith("__Host-session="));
   return raw?.split(";")[0];
 }
 
