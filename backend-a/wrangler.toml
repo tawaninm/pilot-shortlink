@@ -33,7 +33,7 @@ database_id = "c268b5cc-8324-4084-8325-2ea58450c665" # created 2026-11-18, regio
 migrations_dir = "migrations"
 
 [env.production.vars]
-APP_ORIGIN = "https://pilot-shortlink-a.<SUBDOMAIN>.workers.dev" # [TBC] replace <SUBDOMAIN> with the account's workers.dev subdomain
+APP_ORIGIN = "https://pilot-shortlink-a.pilot-shortlink-hash-cpu-spike.workers.dev" # subdomain auto-named by the first spike; Tawan may rename it later (then change this and redeploy)
 
 [env.production.observability]
 enabled = true
