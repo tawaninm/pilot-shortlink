@@ -1,6 +1,6 @@
 # Case study: pilot-shortlink
 
-ร่าง 2026-11-18 ตัวเลขหลัง deploy เป็น `[TBC]` จนกว่าจะทำขั้น 8
+ร่าง 2026-11-18 deploy ครบทั้งสอง backend แล้ว
 
 - **เป้าหมายและปัญหา:**
   1. ทดสอบ workflow สร้างเว็บของ TAWAN-OS (`web-build-workflow`) ตั้งแต่ requirement ถึง deploy กับงานจริง
@@ -20,8 +20,9 @@
   - axe ไม่เจอปัญหา WCAG 2.2 AA
   - CI 7 job ผ่าน
   - A deploy แล้ว: https://pilot-shortlink-a.pilot-shortlink-hash-cpu-spike.workers.dev (2026-11-18) smoke test และ e2e 20/20 ผ่านบน production
-  - B: [TBC] รอบัญชี Render และ Neon
-  - redirect p95 และ Lighthouse: [TBC]
+  - B deploy แล้ว: https://pilot-shortlink-b.onrender.com (2026-11-18, Render free ที่ Singapore + Neon ที่ Singapore) smoke test และ e2e 20/20 ผ่านบน production
+  - redirect วัดจากไทย 50 ครั้ง เปิด connection ใหม่ทุกครั้ง: A p50 197 ms p95 322 ms, B p50 90 ms p95 102 ms
+  - Lighthouse 13.6.0 หน้า login (mobile / desktop): A performance 91/100, B 96/99, accessibility 100 ทั้งคู่, CLS 0
 
 ## 1. ปัญหาและความท้าทาย
 แอปเดียวต้องทำสองครั้งด้วย backend ต่างกัน:
@@ -58,7 +59,11 @@
   - e2e 20/20
   - unit และ integration ของแต่ละ backend (cargo test, go test + testcontainers)
 - **security review แบบ adversarial:** ไม่เจอข้อร้ายแรง เจอข้อที่ควรแก้ 4 ข้อที่เทสต์ไม่จับ ทุกข้อเขียน red test ก่อนแก้
-- **deploy จริง, Lighthouse, redirect p95:** [TBC]
+- **deploy จริง:** ทั้งสองตัวผ่าน smoke test และ e2e 20/20 บน production
+- **redirect:** B เร็วกว่า A ในการวัดครั้งนี้ (p95 102 vs 322 ms) ตัวเลขนี้วัดตอน B ตื่นอยู่ Render free หลับหลังไม่มีคนใช้ 15 นาที คำขอแรกหลังหลับจึงช้ากว่านี้มาก ส่วน A ไม่มี cold start แบบนั้น
+- **Lighthouse 13.6.0:** accessibility 100 ทุกรอบ ที่หักคะแนนเหมือนกันทั้งสองตัว:
+  - SEO 90-91: ไม่มี meta description
+  - Best Practices 96: console มี 401 จาก `/api/me` ตอนยังไม่ login (ตั้งใจ) และ 404 อีก 2 รายการ (น่าจะเป็น favicon) ยังไม่แก้
 
 ## 6. ใช้ AI ขั้นไหน และตัดสินใจเองตรงไหน
 - **AI ทำ:**
@@ -80,6 +85,8 @@
 - **วัดบน production ตั้งแต่ขั้นออกแบบ:** ข้อจำกัดสำคัญของ Workers ไม่โผล่ใน `wrangler dev`
 - **ใส่ `.gitattributes` บังคับ LF ตั้งแต่ commit แรก:** บน Windows, CRLF ทำให้เครื่องมือล้ม 3 ครั้ง
 - **กำหนดเจ้าของไฟล์ร่วมก่อนทำคู่ขนาน:** `ci.yml` และ `verify.py` ถูกสองฝ่ายแก้แล้วชนกัน
+- **ตั้ง region ให้ตรงกับฐานข้อมูลตั้งแต่ต้น:** Blueprint ที่ไม่ระบุ region จะไป Oregon ขณะที่ Neon อยู่ Singapore และเปลี่ยน region หลังสร้างไม่ได้
+- **build image ของ production ใน CI ด้วย:** `go mod download` ใน Dockerfile โหลด module ของเทสต์ไปด้วยจน build บน Render ล้ม ในเครื่องไม่เจอเพราะมี cache
 - **เครื่องเดียวรัน Docker, wrangler และ agent หลายตัวพร้อมกันไม่ไหว:** memory ต่ำ และ Docker หยุดเองหลายครั้ง
 - **ช่องโหว่ของ skill 24 ข้อ:** จดไว้ใน `scratch/tasks/pilot-shortlink/plan.md` ข้อ 12 ใน TAWAN-OS จะนำกลับไปแก้ `web-build-workflow`
 
