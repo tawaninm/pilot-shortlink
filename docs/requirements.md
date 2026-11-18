@@ -14,7 +14,7 @@
 - redirect ตอบภายใน 200 ms ที่ p95 เมื่อ instance ตื่นอยู่ (B บน Render free sleep ได้ วัดหลังตื่น)
 - Lighthouse หน้าหลัก performance และ accessibility อย่างน้อย 90
 - ทุกเคสใน `docs/test-plan.md` ผ่าน
-- บันทึกจุดที่ skill ขาดลง `scratch/tasks/web-build-workflow/plan.md`
+- บันทึกจุดที่ skill ขาดลง `scratch/tasks/web-build-workflow/plan.md` (ปิดแล้ว ย้ายไป `99_ARCHIVE/scratch_history/2026-11-18_web-build-workflow/` ของ TAWAN-OS)
 
 ## 3. User stories
 P0
