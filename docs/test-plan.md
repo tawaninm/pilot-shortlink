@@ -75,14 +75,16 @@ E2E_URL=<url> pnpm -F e2e test
 
 | ส่วน | A (Rust + D1) | B (Go + Postgres) | หลักฐาน |
 |---|---|---|---|
-| contract 53 เทสต์ (AC1-8, 10, 11, OWASP A01/A02/A04-A08/A10, สองบัญชี, concurrency, idempotency) | ผ่าน 53/53 | ผ่าน 53/53 | `python scripts/verify.py a` / `b` |
+| contract 57 เทสต์ (AC1-8, 10, 11, OWASP A01/A02/A04-A08/A10, สองบัญชี, concurrency, idempotency) | ผ่าน 57/57 | ผ่าน 57/57 | `python scripts/verify.py a` / `b` |
 | AC9 ไม่มีคอลัมน์ IP หรือ User-Agent | ผ่าน (`cargo test`, schema.rs) | ผ่าน (testcontainers, schema_test.go) | unit/integration ของแต่ละ backend |
 | AC12 e2e ชุดเดียวผ่านทั้งสอง | ผ่าน 20/20 | ผ่าน 20/20 | `verify.py e2e-a` / `e2e-b` (desktop + 320px) |
 | a11y WCAG 2.2 AA (axe) หน้า login และหน้ารายการที่กางสถิติ | ไม่มี violation | ไม่มี violation | `e2e/tests/quality.spec.ts` |
 | คีย์บอร์ด, ไม่มี scroll แนวนอนที่ 320px | ผ่าน | ผ่าน | `e2e/tests/quality.spec.ts` |
 | A03 supply chain | lockfile ทุกภาษา, `--frozen-lockfile`, pnpm `minimumReleaseAge`, action pin SHA, dependency ทุกตัวออกมาเกิน 3 วัน | | `.github/workflows/ci.yml`, commit messages |
 | SAST | Semgrep 1.182.1 `p/default` + `p/owasp-top-ten`: 1 รายการ (`site.go:50` เขียน index.html ที่ embed ตอน build ลง response) เป็น false positive เพราะไม่ใช่ข้อมูลจากผู้ใช้ | | |
-| security review แบบ adversarial | รอผล | รอผล | `backend-design:security-reviewer` |
+| security review แบบ adversarial | ไม่มีข้อ blocking, should-fix 4 ข้อแก้แล้ว (agy, 11d0742) | ไม่มีข้อ blocking, should-fix แก้แล้ว (Claude, 9404295) | `backend-design:security-reviewer` 2026-11-17, red test 4 ตัวใน contract ผ่าน 57/57 ทั้งสองฝั่ง |
 | A09 log ไม่มี PII | log ใช้ path pattern ไม่มี code/email/cookie มี unit test | log ใช้ route pattern ของ chi, `login_failed` ไม่มี email | |
 
 ข้อจำกัดที่รู้: rate limit เป็น fixed window ต่อนาทีตาม architecture ข้อ 5 คำขอที่คร่อมขอบนาทีได้เกิน 30 ต่อ 60 วินาที (สูงสุดราว 2 เท่า) ยอมรับสำหรับ pilot
+
+ยังไม่แก้ (design trade-off รอตะวันตัดสิน): ล็อกบัญชีคนอื่นได้ด้วยการเดาผิด 5 ครั้ง (key เป็น email อย่างเดียว), ยังไม่มี HSTS, ไม่ลบ session หมดอายุ, ไม่มี `Cache-Control: no-store` บน JSON ที่ต้อง login, cookie ไม่ใช้ prefix `__Host-`
