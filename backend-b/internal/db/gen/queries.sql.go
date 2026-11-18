@@ -398,6 +398,16 @@ func (q *Queries) ListLinks(ctx context.Context, userID int64) ([]ListLinksRow, 
 	return items, nil
 }
 
+const resetRate = `-- name: ResetRate :exec
+DELETE FROM rate_limits WHERE key = $1
+`
+
+// A successful login clears the failure count for that email (the limit counts guesses, not users).
+func (q *Queries) ResetRate(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, resetRate, key)
+	return err
+}
+
 const updateOwnLinkURL = `-- name: UpdateOwnLinkURL :one
 UPDATE links SET url = $3 WHERE code = $1 AND user_id = $2 RETURNING id, code, url, created_at
 `

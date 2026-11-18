@@ -75,8 +75,14 @@ func (s *server) setSession(w http.ResponseWriter, r *http.Request, userID int64
 	return nil
 }
 
+// hashSlots caps concurrent Argon2 runs. Each takes about 19 MiB, so a burst of logins or sign-ups
+// with random emails could exhaust memory on a small instance (S7 security review). Extra requests wait.
+var hashSlots = make(chan struct{}, 4)
+
 // hashTimed runs fn and logs how long Argon2 took (ADR-002 asks to watch hash cost).
 func (s *server) hashTimed(op string, fn func()) {
+	hashSlots <- struct{}{}
+	defer func() { <-hashSlots }()
 	start := time.Now()
 	fn()
 	s.Log.Info("argon2", "op", op, "ms", time.Since(start).Milliseconds())
@@ -132,12 +138,14 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key, window := "login:"+email, s.Now().Truncate(loginWindow)
 
-	failed, err := s.q.GetRateCount(ctx, gen.GetRateCountParams{Key: key, WindowStart: window})
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// Count the attempt atomically before checking the password. Reading first and writing after a
+	// failure let parallel guesses all pass the check (S7 security review). Success resets the count.
+	attempts, err := s.q.BumpRate(ctx, gen.BumpRateParams{Key: key, WindowStart: window})
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	if failed >= loginMaxFailed {
+	if attempts > loginMaxFailed {
 		writeRateLimited(w, int(window.Add(loginWindow).Sub(s.Now()).Seconds()))
 		return
 	}
@@ -158,12 +166,12 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !match {
-		if _, err := s.q.BumpRate(ctx, gen.BumpRateParams{Key: key, WindowStart: window}); err != nil {
-			s.fail(w, err)
-			return
-		}
 		s.Log.Info("login_failed") // no email: logs must not identify people
 		writeProblem(w, http.StatusUnauthorized, "unauthorized", "")
+		return
+	}
+	if err := s.q.ResetRate(ctx, key); err != nil {
+		s.fail(w, err)
 		return
 	}
 	if err := s.setSession(w, r, user.ID); err != nil {

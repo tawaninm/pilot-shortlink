@@ -142,12 +142,16 @@ def backend_b(filters: list[str], tests=None) -> None:
            "APP_ORIGIN": url, "PORT": "8080"}
     server = None
     try:
-        for _ in range(30):  # Postgres needs a few seconds before it accepts connections
-            if subprocess.run(exe(["docker", "exec", PG_CONTAINER, "pg_isready", "-U", "postgres"]), capture_output=True).returncode == 0:
+        for _ in range(60):  # Postgres needs a few seconds before it accepts connections
+            # -h 127.0.0.1 checks TCP: during first init the image runs a socket-only server, then restarts
+            if subprocess.run(exe(["docker", "exec", PG_CONTAINER, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]), capture_output=True).returncode == 0:
                 break
             time.sleep(1)
         run("migrate", ["go", "run", "./cmd/migrate", "up"], cwd=b, env=env)
-        server = start(["go", "run", "./cmd/server"], cwd=b, env=env)
+        # Build first: `go run` compiles inside the health-check timeout, which fails on a busy machine
+        exe_name = "server.exe" if os.name == "nt" else "server"
+        run("build server", ["go", "build", "-o", f".bin/{exe_name}", "./cmd/server"], cwd=b)
+        server = start([str(b / ".bin" / exe_name)], cwd=b, env=env)
         wait_healthy(url, server)
         (tests or contract)(url, filters)
     finally:
