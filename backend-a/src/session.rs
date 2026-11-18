@@ -33,22 +33,25 @@ pub fn hash_session_token(token: &str) -> String {
     hex
 }
 
+/// Name of the session cookie (`__Host-` prefix requires `Secure`, `Path=/`, and no `Domain`).
+pub const SESSION_COOKIE_NAME: &str = "__Host-session";
+
 /// Formats the `Set-Cookie` header value for a newly issued 7-day session.
 pub fn session_cookie_header(token: &str) -> String {
-    format!("session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECS}")
+    format!("{SESSION_COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECS}")
 }
 
 /// Formats the `Set-Cookie` header value that clears the session cookie on logout.
 pub fn clear_session_cookie_header() -> &'static str {
-    "session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+    "__Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
 }
 
-/// Extracts the `session` cookie value from a raw `Cookie` request header.
+/// Extracts the `__Host-session` cookie value from a raw `Cookie` request header.
 pub fn extract_session_cookie(cookie_header: Option<&str>) -> Option<&str> {
     let raw = cookie_header?;
     for part in raw.split(';') {
         let trimmed = part.trim();
-        if let Some(val) = trimmed.strip_prefix("session=") {
+        if let Some(val) = trimmed.strip_prefix("__Host-session=") {
             if !val.is_empty() {
                 return Some(val);
             }
@@ -148,11 +151,12 @@ mod tests {
         let header = session_cookie_header(&token);
         assert_eq!(
             header,
-            format!("session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800")
+            format!("__Host-session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800")
         );
+        assert!(!header.to_ascii_lowercase().contains("domain="));
         assert_eq!(
             clear_session_cookie_header(),
-            "session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+            "__Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
         );
     }
 
@@ -160,9 +164,10 @@ mod tests {
     fn extract_session_cookie_parses_cookie_header() {
         assert_eq!(extract_session_cookie(None), None);
         assert_eq!(extract_session_cookie(Some("")), None);
-        assert_eq!(extract_session_cookie(Some("session=")), None);
+        assert_eq!(extract_session_cookie(Some("__Host-session=")), None);
+        assert_eq!(extract_session_cookie(Some("session=old_token")), None);
         assert_eq!(
-            extract_session_cookie(Some("other=1; session=abc_123-xyz; theme=dark")),
+            extract_session_cookie(Some("other=1; __Host-session=abc_123-xyz; theme=dark")),
             Some("abc_123-xyz")
         );
     }

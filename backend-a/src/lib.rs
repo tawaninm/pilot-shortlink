@@ -43,6 +43,20 @@ pub fn path_pattern(path: &str) -> &'static str {
     }
 }
 
+/// Returns `true` if `path` is an endpoint that requires or manages an active session
+/// (`/api/me`, `/api/links`, `/api/links/{code}`, `/api/links/{code}/stats`, `/api/auth/logout`),
+/// whose responses (including errors) must carry `Cache-Control: no-store`.
+pub fn is_session_endpoint(path: &str) -> bool {
+    matches!(
+        path_pattern(path),
+        "/api/me"
+            | "/api/links"
+            | "/api/links/{code}"
+            | "/api/links/{code}/stats"
+            | "/api/auth/logout"
+    )
+}
+
 /// Returns `true` if `path` is one of the SPA client-side routes that should return `index.html`.
 pub fn is_spa_route(path: &str) -> bool {
     matches!(path, "/" | "/login" | "/register")
@@ -201,7 +215,7 @@ pub async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response
         }
     };
 
-    let response = http::apply_security_headers(raw_response)?;
+    let response = http::apply_security_headers(raw_response, is_session_endpoint(&raw_path))?;
 
     let elapsed_ms = http::now_ms().saturating_sub(start_ms);
     let log_line = format_request_log_with_hash(
@@ -242,6 +256,18 @@ mod tests {
         assert_eq!(path_pattern("/assets/index-IjLlgpqB.js"), "/assets/*");
         assert_eq!(path_pattern("/abc1234"), "/{code}");
         assert_eq!(path_pattern("/admin"), "/*");
+
+        assert!(is_session_endpoint("/api/me"));
+        assert!(is_session_endpoint("/api/links"));
+        assert!(is_session_endpoint("/api/links/my-code"));
+        assert!(is_session_endpoint("/api/links/my-code/stats"));
+        assert!(is_session_endpoint("/api/auth/logout"));
+
+        assert!(!is_session_endpoint("/api/auth/register"));
+        assert!(!is_session_endpoint("/api/auth/login"));
+        assert!(!is_session_endpoint("/health"));
+        assert!(!is_session_endpoint("/"));
+        assert!(!is_session_endpoint("/abc1234"));
     }
 
     #[test]

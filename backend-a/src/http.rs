@@ -4,8 +4,11 @@ use worker::*;
 /// Content-Security-Policy applied to every HTML response (OWASP A02).
 pub const HTML_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
-///Referrer-Policy applied to every HTML response (OWASP A02).
+/// Referrer-Policy applied to every HTML response (OWASP A02).
 pub const HTML_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
+
+/// Strict-Transport-Security applied to every HTML response (S7 review).
+pub const HTML_HSTS: &str = "max-age=31536000; includeSubDomains";
 
 /// Maximum allowed JSON request body size in bytes (16 KiB).
 pub const MAX_JSON_BODY_BYTES: usize = 16 * 1024;
@@ -127,16 +130,21 @@ pub fn is_html_content_type(content_type: &str) -> bool {
 
 /// Attaches security headers in one place for every outgoing response:
 /// - `X-Content-Type-Options: nosniff` on every response (HTML, API, `/health`, `problem+json`, assets).
-/// - `Content-Security-Policy` and `Referrer-Policy` on every `text/html` response.
-pub fn apply_security_headers(response: Response) -> Result<Response> {
+/// - `Content-Security-Policy`, `Referrer-Policy`, and `Strict-Transport-Security` on every `text/html` response.
+/// - `Cache-Control: no-store` on every response from an endpoint that requires or manages a session.
+pub fn apply_security_headers(response: Response, no_store: bool) -> Result<Response> {
     let headers = response.headers().clone();
     headers.set("X-Content-Type-Options", "nosniff")?;
+    if no_store {
+        headers.set("Cache-Control", "no-store")?;
+    }
     let is_html = headers
         .get("Content-Type")?
         .is_some_and(|ct| is_html_content_type(&ct));
     if is_html {
         headers.set("Content-Security-Policy", HTML_CSP)?;
         headers.set("Referrer-Policy", HTML_REFERRER_POLICY)?;
+        headers.set("Strict-Transport-Security", HTML_HSTS)?;
     }
     Ok(response.with_headers(headers))
 }
@@ -310,6 +318,7 @@ mod tests {
         assert!(HTML_CSP.contains("frame-ancestors 'none'"));
         assert!(!HTML_CSP.contains("'unsafe-eval'"));
         assert_eq!(HTML_REFERRER_POLICY, "strict-origin-when-cross-origin");
+        assert_eq!(HTML_HSTS, "max-age=31536000; includeSubDomains");
     }
 
     #[test]
