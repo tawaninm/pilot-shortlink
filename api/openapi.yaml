@@ -1,12 +1,15 @@
 openapi: 3.1.0
 info:
   title: pilot-shortlink API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     สัญญากลางของ backend A (Cloudflare Workers + Rust + D1) และ B (Go + Neon) ทั้งสองต้องผ่าน contract test ชุดเดียวกัน
     Auth ใช้ cookie `__Host-session` (HttpOnly, Secure, SameSite=Lax, Path=/, ไม่มี Domain, 7 วัน prefix `__Host-` บังคับให้ browser รับเฉพาะ cookie ที่ตั้งจาก origin นี้ผ่าน HTTPS) ทุก response ที่ต้อง login ตอบ `Cache-Control: no-store` และหน้า HTML ตอบ `Strict-Transport-Security` request ที่เปลี่ยนข้อมูล (POST, PATCH, DELETE ที่ต้อง login) ต้องมี header `Origin` ตรงกับโดเมนของแอป ไม่มีหรือไม่ตรงตอบ 403 `forbidden_origin` ไม่ประกาศเป็น parameter เพราะ browser ใส่ให้เองและโค้ด frontend ตั้งค่าไม่ได้
     Error ทุกตัวเป็น `application/problem+json` (RFC 9457) และมี `code` ให้ frontend เลือกข้อความ
     ลิงก์ที่ไม่มีและลิงก์ของคนอื่นตอบ 404 รูปแบบเดียวกัน ไม่บอกว่ามีอยู่
+    endpoint ใน `/api/auth/` ที่ไม่ต้อง login (register, login, verify-email, password/*) ตรวจ `Origin` แบบเดียวกัน
+    ลิงก์ในอีเมลสร้างจาก `APP_ORIGIN` ใน config: `<APP_ORIGIN>/verify-email?token=<token>` และ `<APP_ORIGIN>/reset-password?token=<token>`
+    เมื่อรันด้วย `MAIL_MODE=capture` เท่านั้น backend มี `GET /api/test/mail?to=<email>` สำหรับ contract test (ดู `contract/src/client.ts`) route นี้ไม่อยู่ในสัญญาและบน production ต้องตอบ 404
 servers:
   - url: /
 security:
@@ -50,6 +53,76 @@ paths:
       summary: ออกจากระบบ ทำให้ session เดิมใช้ไม่ได้ทันที
       responses:
         '204': { description: ออกจากระบบแล้ว (เรียกซ้ำได้ ผลเท่าเดิม) }
+  /api/auth/verify-email:
+    post:
+      summary: ยืนยัน email ด้วย token จากอีเมล (ไม่ต้อง login เพราะอาจเปิดอีเมลบนเครื่องอื่น)
+      description: |
+        token สุ่ม 32 byte base64url หมดอายุ 30 นาที ใช้ได้ครั้งเดียว ใช้ได้เฉพาะ token จุดประสงค์ยืนยัน email
+        token ผิด หมดอายุ ใช้แล้ว หรือเป็น token รีเซ็ตรหัสผ่าน ตอบ 400 `token_invalid` เหมือนกันทุกกรณี
+        ยืนยันพร้อมกันด้วย token เดียวกันสำเร็จได้ครั้งเดียว หน้าเว็บเรียก endpoint นี้ด้วย POST ไม่มี GET
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenBody' }
+      responses:
+        '204': { description: ยืนยันแล้ว }
+        '400': { $ref: '#/components/responses/TokenInvalid' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Invalid' }
+  /api/auth/verify-email/resend:
+    post:
+      summary: ส่งอีเมลยืนยันใหม่ token ก่อนหน้าใช้ไม่ได้ทันที
+      description: ไม่เกิน 3 ครั้งต่อชั่วโมงต่อบัญชี (ไม่นับอีเมลตอนสมัคร) ถ้ายืนยันแล้วตอบ 204 และไม่ส่งอีเมล
+      responses:
+        '204': { description: รับคำขอแล้ว }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/password/forgot:
+    post:
+      summary: ขอลิงก์รีเซ็ตรหัสผ่านทางอีเมล
+      description: ตอบ 204 เหมือนกันไม่ว่ามี email นี้หรือไม่ ส่งอีเมลเฉพาะ email ที่มีบัญชี ไม่เกิน 3 ครั้งต่อชั่วโมงต่อ email ขอใหม่แล้ว token รีเซ็ตก่อนหน้าใช้ไม่ได้
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              additionalProperties: false
+              properties: { email: { type: string, format: email, maxLength: 254 } }
+      responses:
+        '204': { description: รับคำขอแล้ว }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Invalid' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/password/reset:
+    post:
+      summary: ตั้งรหัสผ่านใหม่ด้วย token จากอีเมล
+      description: |
+        สำเร็จแล้ว session ทั้งหมดของบัญชีใช้ไม่ได้ทันที และถือว่ายืนยัน email แล้ว ไม่ login ให้ ผู้ใช้ต้อง login ด้วยรหัสใหม่
+        ตรวจรหัสผ่านก่อนใช้ token: รหัสสั้นเกินตอบ 422 `weak_password` และ token ยังใช้ได้
+        token ผิด หมดอายุ ใช้แล้ว หรือเป็น token ยืนยัน email ตอบ 400 `token_invalid`
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              additionalProperties: false
+              properties:
+                token: { $ref: '#/components/schemas/EmailToken' }
+                password: { type: string, minLength: 10, maxLength: 128 }
+      responses:
+        '204': { description: เปลี่ยนรหัสผ่านแล้ว }
+        '400': { $ref: '#/components/responses/TokenInvalid' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Invalid' }
   /api/me:
     get:
       summary: ผู้ใช้ปัจจุบัน
@@ -171,8 +244,21 @@ components:
         password: { type: string, minLength: 10, maxLength: 128 }
     Me:
       type: object
-      required: [email]
-      properties: { email: { type: string, format: email } }
+      required: [email, emailVerified]
+      properties:
+        email: { type: string, format: email }
+        emailVerified: { type: boolean, description: false แล้วสร้าง แก้ หรือลบลิงก์ไม่ได้ (403 email_unverified) }
+    EmailToken:
+      type: string
+      minLength: 43
+      maxLength: 43
+      pattern: '^[A-Za-z0-9_-]{43}$'
+      description: 32 byte base64url ไม่มี padding
+    TokenBody:
+      type: object
+      required: [token]
+      additionalProperties: false
+      properties: { token: { $ref: '#/components/schemas/EmailToken' } }
     TargetUrl:
       type: string
       format: uri
@@ -190,7 +276,7 @@ components:
           minLength: 3
           maxLength: 32
           pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{1,30}[A-Za-z0-9])?$'
-          description: ไม่สนตัวพิมพ์ เก็บเป็นตัวพิมพ์เล็ก ห้ามคำสงวน api app admin login logout register static assets health openapi
+          description: ไม่สนตัวพิมพ์ เก็บเป็นตัวพิมพ์เล็ก ห้ามคำสงวน api app admin login logout register static assets health openapi verify-email forgot-password reset-password
     LinkSummary:
       type: object
       required: [code, url, createdAt, clicksTotal, last30Days]
@@ -240,14 +326,17 @@ components:
         detail: { type: string }
         code:
           type: string
-          enum: [unauthorized, forbidden_origin, not_found, email_taken, alias_taken, invalid_url, self_link, invalid_alias, reserved_alias, weak_password, invalid_body, rate_limited, internal_error]
+          enum: [unauthorized, forbidden_origin, email_unverified, not_found, email_taken, alias_taken, invalid_url, self_link, invalid_alias, reserved_alias, weak_password, invalid_body, token_invalid, rate_limited, internal_error]
         field: { type: string, description: 'ช่องที่ผิด เช่น url, alias, email, password' }
   responses:
     Unauthorized:
       description: ไม่ได้เข้าสู่ระบบ session หมดอายุ หรือ email/รหัสผ่านไม่ถูกต้อง
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     Forbidden:
-      description: Origin ไม่ตรงกับแอป
+      description: Origin ไม่ตรงกับแอป (`forbidden_origin`) หรือยังไม่ได้ยืนยัน email (`email_unverified` เฉพาะ endpoint ที่สร้าง แก้ หรือลบลิงก์)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    TokenInvalid:
+      description: token ผิด หมดอายุ ใช้แล้ว หรือผิดจุดประสงค์ (`token_invalid` ข้อความเดียวกันทุกกรณี)
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     NotFound:
       description: ไม่มีลิงก์นี้ หรือเป็นลิงก์ของคนอื่น (ตอบเหมือนกัน)

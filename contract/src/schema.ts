@@ -125,6 +125,188 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/verify-email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ยืนยัน email ด้วย token จากอีเมล (ไม่ต้อง login เพราะอาจเปิดอีเมลบนเครื่องอื่น)
+         * @description token สุ่ม 32 byte base64url หมดอายุ 30 นาที ใช้ได้ครั้งเดียว ใช้ได้เฉพาะ token จุดประสงค์ยืนยัน email
+         *     token ผิด หมดอายุ ใช้แล้ว หรือเป็น token รีเซ็ตรหัสผ่าน ตอบ 400 `token_invalid` เหมือนกันทุกกรณี
+         *     ยืนยันพร้อมกันด้วย token เดียวกันสำเร็จได้ครั้งเดียว หน้าเว็บเรียก endpoint นี้ด้วย POST ไม่มี GET
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TokenBody"];
+                };
+            };
+            responses: {
+                /** @description ยืนยันแล้ว */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["TokenInvalid"];
+                403: components["responses"]["Forbidden"];
+                422: components["responses"]["Invalid"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/verify-email/resend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ส่งอีเมลยืนยันใหม่ token ก่อนหน้าใช้ไม่ได้ทันที
+         * @description ไม่เกิน 3 ครั้งต่อชั่วโมงต่อบัญชี (ไม่นับอีเมลตอนสมัคร) ถ้ายืนยันแล้วตอบ 204 และไม่ส่งอีเมล
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description รับคำขอแล้ว */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                429: components["responses"]["RateLimited"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/password/forgot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ขอลิงก์รีเซ็ตรหัสผ่านทางอีเมล
+         * @description ตอบ 204 เหมือนกันไม่ว่ามี email นี้หรือไม่ ส่งอีเมลเฉพาะ email ที่มีบัญชี ไม่เกิน 3 ครั้งต่อชั่วโมงต่อ email ขอใหม่แล้ว token รีเซ็ตก่อนหน้าใช้ไม่ได้
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: email */
+                        email: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description รับคำขอแล้ว */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                422: components["responses"]["Invalid"];
+                429: components["responses"]["RateLimited"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/password/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ตั้งรหัสผ่านใหม่ด้วย token จากอีเมล
+         * @description สำเร็จแล้ว session ทั้งหมดของบัญชีใช้ไม่ได้ทันที และถือว่ายืนยัน email แล้ว ไม่ login ให้ ผู้ใช้ต้อง login ด้วยรหัสใหม่
+         *     ตรวจรหัสผ่านก่อนใช้ token: รหัสสั้นเกินตอบ 422 `weak_password` และ token ยังใช้ได้
+         *     token ผิด หมดอายุ ใช้แล้ว หรือเป็น token ยืนยัน email ตอบ 400 `token_invalid`
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        token: components["schemas"]["EmailToken"];
+                        password: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description เปลี่ยนรหัสผ่านแล้ว */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["TokenInvalid"];
+                403: components["responses"]["Forbidden"];
+                422: components["responses"]["Invalid"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/me": {
         parameters: {
             query?: never;
@@ -445,6 +627,13 @@ export interface components {
         Me: {
             /** Format: email */
             email: string;
+            /** @description false แล้วสร้าง แก้ หรือลบลิงก์ไม่ได้ (403 email_unverified) */
+            emailVerified: boolean;
+        };
+        /** @description 32 byte base64url ไม่มี padding */
+        EmailToken: string;
+        TokenBody: {
+            token: components["schemas"]["EmailToken"];
         };
         /**
          * Format: uri
@@ -453,7 +642,7 @@ export interface components {
         TargetUrl: string;
         CreateLink: {
             url: components["schemas"]["TargetUrl"];
-            /** @description ไม่สนตัวพิมพ์ เก็บเป็นตัวพิมพ์เล็ก ห้ามคำสงวน api app admin login logout register static assets health openapi */
+            /** @description ไม่สนตัวพิมพ์ เก็บเป็นตัวพิมพ์เล็ก ห้ามคำสงวน api app admin login logout register static assets health openapi verify-email forgot-password reset-password */
             alias?: string;
         };
         LinkSummary: {
@@ -486,7 +675,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthorized" | "forbidden_origin" | "not_found" | "email_taken" | "alias_taken" | "invalid_url" | "self_link" | "invalid_alias" | "reserved_alias" | "weak_password" | "invalid_body" | "rate_limited" | "internal_error";
+            code: "unauthorized" | "forbidden_origin" | "email_unverified" | "not_found" | "email_taken" | "alias_taken" | "invalid_url" | "self_link" | "invalid_alias" | "reserved_alias" | "weak_password" | "invalid_body" | "token_invalid" | "rate_limited" | "internal_error";
             /** @description ช่องที่ผิด เช่น url, alias, email, password */
             field?: string;
         };
@@ -501,8 +690,17 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description Origin ไม่ตรงกับแอป */
+        /** @description Origin ไม่ตรงกับแอป (`forbidden_origin`) หรือยังไม่ได้ยืนยัน email (`email_unverified` เฉพาะ endpoint ที่สร้าง แก้ หรือลบลิงก์) */
         Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description token ผิด หมดอายุ ใช้แล้ว หรือผิดจุดประสงค์ (`token_invalid` ข้อความเดียวกันทุกกรณี) */
+        TokenInvalid: {
             headers: {
                 [name: string]: unknown;
             };
