@@ -1,11 +1,11 @@
 # Case study: pilot-shortlink
 
-ร่าง 2026-11-18 deploy ครบทั้งสอง backend แล้ว
+ปิดงาน 2026-11-18
 
 - **เป้าหมายและปัญหา:**
   1. ทดสอบ workflow สร้างเว็บของ TAWAN-OS (`web-build-workflow`) ตั้งแต่ requirement ถึง deploy กับงานจริง
   2. ได้แอปย่อลิงก์ที่ใช้เองได้ เช่นลิงก์ portfolio หรือ CV ที่อยากรู้ว่ามีคนเปิดจากที่ไหน
-- **ระยะเวลา:** 2026-11-17 ถึง [TBC] (ขั้น 0-7 ใช้ราว 2 วัน)
+- **ระยะเวลา:** 2026-11-17 ถึง 2026-11-18 (ขั้น 0-9 รวม 2 วัน)
 - **ประเภท:** ฝึกเอง
 - **ทีม:** ตะวัน (ตัดสินใจทุก gate), Claude Code (ออกแบบ, รีวิว, เขียน backend B และหน้าเว็บ), agy (เขียน backend A)
 - **บทบาทของตะวัน:**
@@ -15,7 +15,7 @@
   - ตอบ Proceed ก่อนเริ่มเขียนโค้ด
   - สั่งให้ทำ A กับ B คู่ขนาน
 - **ผลลัพธ์ (ในเครื่องและ CI):**
-  - backend สองตัวผ่าน contract test ชุดเดียวกัน 57/57
+  - backend สองตัวผ่าน contract test ชุดเดียวกัน 58/58
   - e2e 20/20 ทั้งคู่ (desktop และจอ 320px)
   - axe ไม่เจอปัญหา WCAG 2.2 AA
   - CI 7 job ผ่าน
@@ -55,7 +55,7 @@
 
 ## 5. ผลลัพธ์
 - **เทสต์ทั้งสอง backend:**
-  - contract 57/57
+  - contract 58/58
   - e2e 20/20
   - unit และ integration ของแต่ละ backend (cargo test, go test + testcontainers)
 - **security review แบบ adversarial:** ไม่เจอข้อร้ายแรง เจอข้อที่ควรแก้ 4 ข้อที่เทสต์ไม่จับ ทุกข้อเขียน red test ก่อนแก้
@@ -88,6 +88,6 @@
 - **ตั้ง region ให้ตรงกับฐานข้อมูลตั้งแต่ต้น:** Blueprint ที่ไม่ระบุ region จะไป Oregon ขณะที่ Neon อยู่ Singapore และเปลี่ยน region หลังสร้างไม่ได้
 - **build image ของ production ใน CI ด้วย:** `go mod download` ใน Dockerfile โหลด module ของเทสต์ไปด้วยจน build บน Render ล้ม ในเครื่องไม่เจอเพราะมี cache
 - **เครื่องเดียวรัน Docker, wrangler และ agent หลายตัวพร้อมกันไม่ไหว:** memory ต่ำ และ Docker หยุดเองหลายครั้ง
-- **ช่องโหว่ของ skill 24 ข้อ:** จดไว้ใน `scratch/tasks/pilot-shortlink/plan.md` ข้อ 12 ใน TAWAN-OS จะนำกลับไปแก้ `web-build-workflow`
+- **ช่องโหว่ของ skill 24 ข้อ:** นำกลับไปแก้ `web-build-workflow` ใน TAWAN-OS แล้ว (commit ce1b110c) สรุปอยู่ที่ `docs/specs/pilot_shortlink.md` ของ TAWAN-OS
 
 ภาพหน้าจอ: `docs/screenshots/` (desktop, มือถือ 320px, dark mode)
