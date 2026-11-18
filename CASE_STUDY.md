@@ -19,7 +19,9 @@
   - e2e 20/20 ทั้งคู่ (desktop และจอ 320px)
   - axe ไม่เจอปัญหา WCAG 2.2 AA
   - CI 7 job ผ่าน
-  - URL จริงและเวลา redirect p95: [TBC]
+  - A deploy แล้ว: https://pilot-shortlink-a.pilot-shortlink-hash-cpu-spike.workers.dev (2026-11-18) smoke test และ e2e 20/20 ผ่านบน production
+  - B: [TBC] รอบัญชี Render และ Neon
+  - redirect p95 และ Lighthouse: [TBC]
 
 ## 1. ปัญหาและความท้าทาย
 แอปเดียวต้องทำสองครั้งด้วย backend ต่างกัน:
