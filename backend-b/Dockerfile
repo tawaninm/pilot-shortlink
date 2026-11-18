@@ -16,8 +16,8 @@ RUN pnpm -F web build
 # 2. Go server with the web app embedded (internal/site)
 FROM golang:1.27.4-alpine AS build
 WORKDIR /src
-COPY backend-b/go.mod backend-b/go.sum ./
-RUN go mod download
+# No `go mod download`: it fetches test-only modules too (testcontainers, moby), which broke a Render build.
+# `go build` fetches only what cmd/server and cmd/migrate import, still checked against go.sum.
 COPY backend-b/ .
 COPY --from=web /repo/web/dist internal/site/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server \
