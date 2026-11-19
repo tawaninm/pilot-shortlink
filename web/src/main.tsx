@@ -4,7 +4,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError } from "./api";
 import { AuthPage } from "./pages/AuthPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { LinksPage } from "./pages/LinksPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
+import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -19,6 +22,11 @@ const queryClient = new QueryClient({
 const authSearch = (s: Record<string, unknown>) => ({
   email: typeof s.email === "string" ? s.email : undefined,
   expired: s.expired === true || s.expired === "1" ? true : undefined,
+  reset: s.reset === true || s.reset === "1" ? true : undefined,
+});
+
+const forgotSearch = (s: Record<string, unknown>) => ({
+  email: typeof s.email === "string" ? s.email : undefined,
 });
 
 const root = createRootRoute({ component: Outlet });
@@ -35,6 +43,22 @@ const routeTree = root.addChildren([
     path: "/register",
     validateSearch: authSearch,
     component: () => <AuthPage mode="register" />,
+  }),
+  createRoute({
+    getParentRoute: () => root,
+    path: "/verify-email",
+    component: VerifyEmailPage,
+  }),
+  createRoute({
+    getParentRoute: () => root,
+    path: "/forgot-password",
+    validateSearch: forgotSearch,
+    component: ForgotPasswordPage,
+  }),
+  createRoute({
+    getParentRoute: () => root,
+    path: "/reset-password",
+    component: ResetPasswordPage,
   }),
 ]);
 const router = createRouter({ routeTree });

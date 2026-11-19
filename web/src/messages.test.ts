@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
-import { authError, linkError } from "./messages";
+import {
+  authError,
+  forgotPasswordError,
+  linkError,
+  resendEmailError,
+  resetPasswordError,
+  verifyEmailError,
+} from "./messages";
 
-const problem = (status: number, code: string, retryAfter?: number) =>
-  new ApiError(status, { type: "about:blank", title: "", status, code } as never, retryAfter);
+const problem = (status: number, code: string, retryAfter?: number, field?: string) =>
+  new ApiError(status, { type: "about:blank", title: "", status, code, field } as never, retryAfter);
 
 describe("linkError", () => {
   it("puts alias problems under the alias field with a suggestion", () => {
@@ -48,5 +55,37 @@ describe("authError", () => {
 
   it("marks a taken email on the email field", () => {
     expect(authError(problem(409, "email_taken"), "register").field).toBe("email");
+  });
+});
+
+describe("account email and password reset messages", () => {
+  it("formats resend rate limits in whole minutes", () => {
+    expect(resendEmailError(problem(429, "rate_limited", 90))).toBe("ขอส่งบ่อยเกินไป ลองใหม่ใน 2 นาที");
+    expect(resendEmailError(new ApiError(0))).toMatch(/อินเทอร์เน็ต/);
+  });
+
+  it("returns the unified alert for invalid verify tokens", () => {
+    expect(verifyEmailError(problem(400, "token_invalid"))).toBe("ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว");
+    expect(verifyEmailError(problem(422, "invalid_body"))).toBe("ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว");
+  });
+
+  it("handles forgot-password rate limit and invalid email", () => {
+    expect(forgotPasswordError(problem(429, "rate_limited", 1800))).toEqual({
+      field: "form",
+      text: "ขอลิงก์บ่อยเกินไป ลองใหม่ใน 30 นาที",
+    });
+    expect(forgotPasswordError(problem(422, "invalid_body")).field).toBe("email");
+  });
+
+  it("distinguishes weak_password from token_invalid on reset-password", () => {
+    expect(resetPasswordError(problem(422, "weak_password"))).toEqual({
+      field: "password",
+      text: "รหัสผ่านต้องยาว 10-128 ตัว",
+    });
+    expect(resetPasswordError(problem(400, "token_invalid"))).toEqual({
+      field: "form",
+      text: "ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว",
+      tokenInvalid: true,
+    });
   });
 });
