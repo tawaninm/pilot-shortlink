@@ -102,6 +102,18 @@ def web(_: list[str]) -> None:
         run("ds-check", ["node", str(DS_CHECK), "check", "web/src", "--tokens", "design/tokens.json"])
 
 
+FAKE_IDP = "http://127.0.0.1:9411"
+# OAuth and Turnstile fakes (docs/test-plan.md section 9): CLI/env only, never in wrangler.toml or render.yaml,
+# and the backends refuse them unless APP_ORIGIN is localhost (AC-O11)
+FAKES = {"OAUTH_MODE": "fake", "OAUTH_FAKE_BASE": FAKE_IDP, "TURNSTILE_MODE": "fake"}
+
+
+def start_fake_idp() -> subprocess.Popen:
+    proc = start(["node", "contract/fake-idp.mjs", "9411"], cwd=ROOT)
+    wait_healthy(FAKE_IDP, proc, timeout=30)
+    return proc
+
+
 def build_web() -> None:
     """Both backends serve web/dist (C8, ADR-001), so the app is built before a backend starts."""
     run("web build", ["pnpm", "-F", "web", "build"])
@@ -115,12 +127,15 @@ def backend_a(filters: list[str], tests=None) -> None:
     run("migrate", [*WRANGLER, "d1", "migrations", "apply", "DB", "--local"], cwd=a)
     url = "http://localhost:8787"
     # MAIL_MODE=capture only on the command line, never in wrangler.toml, so it cannot reach production (AC-V8)
-    server = start([*WRANGLER, "dev", "--port", "8787", "--var", "MAIL_MODE:capture"], cwd=a)
+    fake_vars = [arg for k, v in FAKES.items() for arg in ("--var", f"{k}:{v}")]
+    idp = start_fake_idp()
+    server = start([*WRANGLER, "dev", "--port", "8787", "--var", "MAIL_MODE:capture", *fake_vars], cwd=a)
     try:
         wait_healthy(url, server)
         (tests or contract)(url, filters)
     finally:
         stop(server)
+        stop(idp)
 
 
 def backend_b(filters: list[str], tests=None) -> None:
@@ -140,8 +155,9 @@ def backend_b(filters: list[str], tests=None) -> None:
                      "-p", "55432:5432", PG_IMAGE])
     url = "http://localhost:8080"
     env = {**os.environ, "DATABASE_URL": "postgres://postgres:verify@localhost:55432/postgres?sslmode=disable",
-           "APP_ORIGIN": url, "PORT": "8080", "MAIL_MODE": "capture"}
+           "APP_ORIGIN": url, "PORT": "8080", "MAIL_MODE": "capture", **FAKES}
     server = None
+    idp = start_fake_idp()
     try:
         for _ in range(60):  # Postgres needs a few seconds before it accepts connections
             # -h 127.0.0.1 checks TCP: during first init the image runs a socket-only server, then restarts
@@ -158,6 +174,7 @@ def backend_b(filters: list[str], tests=None) -> None:
     finally:
         if server:
             stop(server)
+        stop(idp)
         subprocess.run(exe(["docker", "rm", "-f", PG_CONTAINER]), capture_output=True)
 
 

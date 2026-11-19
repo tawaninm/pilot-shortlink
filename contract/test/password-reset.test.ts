@@ -1,12 +1,12 @@
 // Forgot / reset password (requirements AC-R1..R7, test-plan section 8). Token expiry is in backend unit tests.
 import { describe, expect, it } from "vitest";
 import {
-  anon, mailCountAfterPause, PASSWORD, problem, readMail, registerUnverified, registerUser, sessionCookie, tokenFrom, uniqueEmail,
+  anon, CAPTCHA, mailCountAfterPause, PASSWORD, problem, readMail, registerUnverified, registerUser, sessionCookie, tokenFrom, uniqueEmail,
   waitForMail, withCookie,
 } from "../src/client";
 
 const NEW_PASSWORD = "a-brand-new-passphrase";
-const forgot = (email: string) => anon().POST("/api/auth/password/forgot", { body: { email } });
+const forgot = (email: string) => anon().POST("/api/auth/password/forgot", { body: { email, captcha: CAPTCHA } });
 const reset = (token: string, password = NEW_PASSWORD) => anon().POST("/api/auth/password/reset", { body: { token, password } });
 const login = (email: string, password: string) => anon().POST("/api/auth/login", { body: { email, password } });
 

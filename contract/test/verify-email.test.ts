@@ -2,7 +2,7 @@
 // each backend's unit tests because a contract test cannot wait that long.
 import { describe, expect, it } from "vitest";
 import {
-  anon, BASE_URL, mailCountAfterPause, ORIGIN, problem, registerUnverified, registerUser, tokenFrom, uniqueEmail, waitForMail,
+  anon, BASE_URL, CAPTCHA, mailCountAfterPause, ORIGIN, problem, registerUnverified, registerUser, tokenFrom, uniqueEmail, waitForMail,
 } from "../src/client";
 
 const TARGET = "https://example.com/target";
@@ -127,7 +127,7 @@ describe("verify email", () => {
     const res = await fetch(`${BASE_URL}/api/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Origin: ORIGIN, "X-Forwarded-Host": "evil.example", Forwarded: "host=evil.example" },
-      body: JSON.stringify({ email, password: "correct-horse-battery" }),
+      body: JSON.stringify({ email, password: "correct-horse-battery", captcha: CAPTCHA }),
     });
     expect(res.status).toBe(201);
     const [mail] = await waitForMail(email, 1);

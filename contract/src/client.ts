@@ -35,9 +35,12 @@ export type User = Awaited<ReturnType<typeof registerUser>>;
 export const withCookie = (cookie: string) =>
   createClient<paths>({ baseUrl: BASE_URL, headers: { Origin: ORIGIN, Cookie: cookie }, fetch: keepClone });
 
+/** Captcha value the backends accept when they run with TURNSTILE_MODE=fake (AC-T*). */
+export const CAPTCHA = "fake-pass";
+
 /** Registers a fresh user without verifying the email (AC-V*). */
 export async function registerUnverified(email = uniqueEmail()) {
-  const { response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD } });
+  const { response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD, captcha: CAPTCHA } });
   if (response.status !== 201) throw new Error(`register ${email}: ${response.status}`);
   const cookie = sessionCookie(response);
   if (!cookie) throw new Error("register: no session cookie");
@@ -104,3 +107,47 @@ export async function problem(res: Response) {
   }
   return (await (unread.get(res) ?? res.clone()).json()) as { type: string; title: string; status: number; code: string; field?: string; detail?: string };
 }
+
+// --- OAuth through the fake IdP (backend runs with OAUTH_MODE=fake, see contract/fake-idp.mjs) ---
+export type Provider = "google" | "github";
+export type GoogleUser = { sub: string; email: string; email_verified: boolean };
+export type GithubUser = { id: number; emails: { email: string; primary: boolean; verified: boolean }[] };
+export type FakeUser = GoogleUser | GithubUser | { error: string } | { token_error: true };
+
+const cookieValue = (res: Response, name: string) =>
+  res.headers.getSetCookie().find((c) => c.startsWith(`${name}=`))?.split(";")[0];
+
+/** GET /start without following the redirect: the authorize URL and the __Host-oauth cookie it set. */
+export async function oauthStart(provider: Provider) {
+  const res = await fetch(`${BASE_URL}/api/auth/oauth/${provider}/start`, { redirect: "manual" });
+  const authorizeUrl = res.headers.get("location") ?? "";
+  if (res.status !== 302 || !authorizeUrl) throw new Error(`oauth start ${provider}: expected 302 with Location, got ${res.status}`);
+  return { res, authorizeUrl, stateCookie: cookieValue(res, "__Host-oauth") };
+}
+
+/** Follows the fake authorize step for `user` and returns the callback URL the provider sends the browser to. */
+export async function fakeAuthorize(authorizeUrl: string, user: FakeUser) {
+  const url = new URL(authorizeUrl);
+  url.searchParams.set("fake_user", Buffer.from(JSON.stringify(user)).toString("base64url"));
+  const res = await fetch(url, { redirect: "manual" });
+  if (res.status !== 302) throw new Error(`fake authorize ${res.status}: ${await res.text()}`);
+  return res.headers.get("location") ?? "";
+}
+
+/** Calls the backend callback like the browser would (with or without the state cookie). */
+export async function oauthCallback(callbackUrl: string, stateCookie?: string) {
+  const res = await fetch(callbackUrl, { redirect: "manual", headers: stateCookie ? { Cookie: stateCookie } : {} });
+  return { res, location: res.headers.get("location") ?? "", session: sessionCookie(res) };
+}
+
+/** Full login: start -> fake provider -> callback. */
+export async function oauthLogin(provider: Provider, user: FakeUser) {
+  const start = await oauthStart(provider);
+  const callbackUrl = await fakeAuthorize(start.authorizeUrl, user);
+  return { ...(await oauthCallback(callbackUrl, start.stateCookie)), start, callbackUrl };
+}
+
+let fakeSeq = 0;
+export const googleUser = (email = uniqueEmail(), verified = true): GoogleUser => ({ sub: `g${Date.now()}${fakeSeq++}`, email, email_verified: verified });
+export const githubUser = (email = uniqueEmail(), verified = true): GithubUser =>
+  ({ id: Date.now() * 100 + (fakeSeq++ % 100), emails: [{ email, primary: true, verified }] });

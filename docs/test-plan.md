@@ -125,3 +125,32 @@ OWASP ที่เพิ่ม:
 ผลกับ AC12: helper `register()` ของ e2e ยืนยัน email ผ่าน capture จึงรัน e2e ชุดเต็มได้เฉพาะเมื่อ backend เปิด `MAIL_MODE=capture` (`verify.py e2e-a` / `e2e-b`) ไม่ใช่กับ URL production อีกต่อไป หลัง deploy ใช้ smoke check แทน: `/api/test/mail` ได้ 404 (AC-V8), ตะวันสมัครด้วยอีเมลจริง (AC-V12) และสแกน QR ด้วยมือถือ
 QR ใน e2e ถอดรหัสจริงด้วย `jsqr` 1.4.0 (devDependency ของ `e2e` เท่านั้น ไม่เข้า bundle) เพราะ AC-Q1 ต้องการ URL ตรงทุกตัวอักษร การตรวจแค่ว่าไฟล์มี `<svg` พิสูจน์ข้อนี้ไม่ได้
 สถานะ red (2026-11-19, backend A): contract ใหม่ 26/26 fail ด้วย 404 หรือ field ไม่มี, e2e `addons.spec.ts` 12/12 fail เพราะไม่มีแถบเตือนและ route capture
+
+## 9. OAuth (Google, GitHub) และ Turnstile (2026-11-19, plan `pilot-oauth`)
+
+contract และ e2e ไม่เรียก provider จริง `scripts/verify.py` เปิด fake IdP (`contract/fake-idp.mjs`, Node ล้วน) ที่ `http://127.0.0.1:9411` ก่อน backend แล้วส่ง `OAUTH_MODE=fake`, `OAUTH_FAKE_BASE` และ `TURNSTILE_MODE=fake` ให้ backend ผ่าน CLI/env เท่านั้น fake IdP ตรวจ PKCE S256, `redirect_uri` และ client secret จริง ตัวตนที่คืนกำหนดต่อคำขอด้วย query `fake_user` (base64url ของ JSON) ที่เทสต์ต่อท้าย authorize URL หรือกรอกในฟอร์มของหน้า authorize ปลอม (e2e) ผู้ใช้ปกติของเทสต์ส่ง `captcha: "fake-pass"` ผ่าน helper ใน `contract/src/client.ts`
+
+| AC | เทสต์ | ชนิด | ไฟล์ |
+|---|---|---|---|
+| O1-O10 | ชื่อขึ้นต้นด้วย `AC-O<n>:` | contract | `contract/test/oauth.test.ts` |
+| O11 | fake mode ไม่มีบน production, provider อื่น 404 | unit + contract (404) + smoke หลัง deploy | `oauth.rs`, `internal/oauth`, `curl` ตาม `docs/deploy.md` |
+| T1-T2 | ชื่อขึ้นต้นด้วย `AC-T<n>:` | contract | `contract/test/captcha.test.ts` |
+| T3, W1 | ชื่อขึ้นต้นด้วย `AC-T3`, `AC-W1` | e2e | `e2e/tests/oauth.spec.ts` |
+| Gate 4-5 | ตะวัน login ด้วย Google และ GitHub บน production, สมัครผ่าน widget จริง | มือ | บันทึกผลในตารางผลตรวจ |
+
+OWASP ที่เพิ่ม:
+| หมวด | เคส | เทสต์ |
+|---|---|---|
+| A01 / A07 | ยึดบัญชีด้วยอีเมลที่ provider ไม่ได้ยืนยัน | AC-O3, AC-O4 |
+| A07 | login CSRF, state ซ้ำหรือไม่ผูก cookie, PKCE | AC-O5, AC-O6 |
+| A01 | open redirect หลัง login | AC-O7 |
+| A05 | fake mode หรือ capture บน production | AC-O11, smoke |
+| A04 | บอทสมัครหรือยิงลืมรหัสผ่าน | AC-T1 |
+| A09 | log ไม่มี code, token, state, captcha | unit test log ในแต่ละ backend |
+
+นอก OWASP:
+| เคส | เทสต์ |
+|---|---|
+| Concurrency | `concurrency: one state, two callbacks, one session` ส่ง callback พร้อมกันสองครั้ง สำเร็จครั้งเดียว |
+| Idempotency | AC-O9 login ซ้ำด้วย (provider, subject) เดิมได้บัญชีเดิม ไม่สร้างแถวซ้ำ |
+| Authorization สองบัญชี | `A01: Google user B never lands in user A` ผู้ใช้สองคนอีเมลต่างกัน login สลับกันได้บัญชีของตัวเอง |

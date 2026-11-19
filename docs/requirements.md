@@ -34,6 +34,10 @@ P1 รอบเพิ่มระบบเสริม (ตะวันสั่
 10. ลืมรหัสผ่าน: ขอลิงก์รีเซ็ตทางอีเมลแล้วตั้งรหัสใหม่
 11. ดาวน์โหลด QR code ของลิงก์สั้นเป็นไฟล์ SVG
 
+P1 รอบ OAuth และกันบอท (ตะวันสั่ง 2026-11-19, plan `pilot-oauth` ใน TAWAN-OS)
+12. เข้าสู่ระบบหรือสมัครด้วย Google หรือ GitHub โดยไม่ต้องตั้งรหัสผ่าน ถ้าอีเมลตรงกับบัญชีเดิมที่ provider ยืนยันแล้ว ได้บัญชีเดิม
+13. ฟอร์มสมัครและลืมรหัสผ่านมี Cloudflare Turnstile กันบอท
+
 ## 4. Requirements
 - **URL ปลายทาง:** รับเฉพาะ `http` และ `https`, ยาวไม่เกิน 2048 ตัวอักษร, ปฏิเสธ URL ที่ชี้กลับมาที่โดเมนของแอปเอง (กัน redirect วน)
 - **Alias:** 3-32 ตัว ใช้ได้ `a-z 0-9 -` ไม่ขึ้นต้นหรือลงท้ายด้วย `-` ไม่สนตัวพิมพ์ใหญ่เล็ก (`CV` กับ `cv` คือตัวเดียวกัน) ห้ามคำสงวน: `api`, `app`, `admin`, `login`, `logout`, `register`, `static`, `assets`, `health`, `openapi`, `verify-email`, `forgot-password`, `reset-password` (สามคำหลังเป็นหน้าเว็บที่เพิ่ม 2026-11-19)
@@ -48,6 +52,8 @@ P1 รอบเพิ่มระบบเสริม (ตะวันสั่
 - **ลืมรหัสผ่าน:** หน้าขอลิงก์ตอบ 204 ข้อความเดียวกันไม่ว่ามี email นั้นหรือไม่, ส่งอีเมลรีเซ็ตได้ไม่เกิน 3 ฉบับต่อชั่วโมงต่อ email ครั้งที่เกินตอบ 204 เหมือนเดิมแต่ไม่ส่งอีเมลและไม่ยกเลิกลิงก์เดิม (ถ้าตอบ 429 คนอื่นจะใช้อีเมลเราขอซ้ำจนเราขอเองไม่ได้ ตัดสิน 2026-11-19), ตั้งรหัสใหม่แล้วลบ session ทั้งหมดของบัญชีนั้น, รีเซ็ตสำเร็จถือว่ายืนยัน email แล้ว (เพราะพิสูจน์ว่าเข้ากล่องจดหมายได้)
 - **ส่งอีเมล:** ผ่าน Resend ส่งเบื้องหลังหลังบันทึกข้อมูลแล้ว, Resend ล่มแล้วการสมัครหรือการขอลิงก์ยังสำเร็จ (ผู้ใช้กดส่งใหม่ได้), ใช้ header `Idempotency-Key`
 - **QR:** สร้างในเบราว์เซอร์จาก URL ลิงก์สั้น ไม่ต้องมี endpoint ใหม่ ดาวน์โหลดเป็น SVG ชื่อ `<code>.svg`
+- **OAuth (Google, GitHub):** Authorization Code + PKCE S256, `state` ใช้ครั้งเดียวอายุ 10 นาทีผูกกับ cookie `__Host-oauth` ของ browser ที่เริ่ม, `redirect_uri` สร้างจาก `APP_ORIGIN`, ตัวระบุบัญชีคือ (provider, subject) ไม่ใช่อีเมล, ผูกกับบัญชีอีเมลเดียวกันอัตโนมัติเฉพาะเมื่อ provider ยืนยันอีเมล (Google `email_verified`, GitHub อีเมล `primary` และ `verified` จาก `/user/emails`) ไม่อย่างนั้นปฏิเสธ (ตัดสิน D1 2026-11-19), บัญชีที่สร้างจาก OAuth ถือว่ายืนยัน email แล้วและไม่มีรหัสผ่าน (ตั้งได้ผ่านลืมรหัสผ่าน), จบที่ `/` หรือ `/login?error=oauth` เท่านั้น ไม่รับ URL ปลายทางจาก query, log ห้ามมี code, token, state หรืออีเมล
+- **Turnstile:** ฟอร์มสมัครและลืมรหัสผ่านส่ง `captcha` ตรวจที่ server ก่อนแตะข้อมูลบัญชี ไม่มีหรือไม่ผ่านได้ 403 `captcha_failed` ไม่ใส่ในหน้า login (มี rate limit อยู่แล้ว ตัดสิน D6 2026-11-19) sitekey สาธารณะส่งให้หน้าเว็บผ่าน `GET /api/config`
 - **ภาษา UI:** ไทย
 
 ## 5. UX notes
@@ -61,11 +67,13 @@ P1 รอบเพิ่มระบบเสริม (ตะวันสั่
 - free tier เท่านั้น: Workers Free + D1, Render Free + Neon Free, Resend Free (3,000 ฉบับต่อเดือน, 100 ฉบับต่อวัน)
 - ไม่ซื้อโดเมน (ตะวันเลือก 2026-11-19): ผู้ส่งเป็น `onboarding@resend.dev` ซึ่ง Resend ส่งได้แค่ถึงอีเมลของเจ้าของบัญชี Resend ผู้ใช้คนอื่นบน production สมัครได้แต่จะไม่ได้รับอีเมล จนกว่าจะมีโดเมนที่ยืนยันกับ Resend แล้ว
 - เทสต์อัตโนมัติไม่เรียก Resend จริง ใช้ adapter `capture` ที่เปิดด้วย `MAIL_MODE=capture` เท่านั้น
+- เทสต์อัตโนมัติไม่เรียก Google, GitHub หรือ Cloudflare จริง ใช้ fake IdP (`OAUTH_MODE=fake`, `OAUTH_FAKE_BASE`) และ `TURNSTILE_MODE=fake` ที่เปิดได้เฉพาะ `APP_ORIGIN` เป็น localhost
+- Secret ใหม่ต่อ backend ตะวันตั้งเอง: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TURNSTILE_SECRET` และค่าสาธารณะ `TURNSTILE_SITE_KEY`; GitHub OAuth App แยก A กับ B (callback ได้ URL เดียวต่อแอป), Google OAuth client เดียวใส่ redirect URI สองอัน สถานะ Testing ขอแค่ `openid email profile`
 - โปรเจกต์อยู่ที่ `D:\TAWAN-OS\pilot-shortlink\` นอก Obsidian vault
 - ไม่เดาแทนตะวันเรื่องบัญชีและ login ของ Cloudflare, Render, Neon, GitHub
 
 ## 7. Out of scope
-ทีมหรือการแชร์ลิงก์, custom domain, วันหมดอายุของลิงก์, สถิติประเทศหรืออุปกรณ์, การชำระเงิน, เปลี่ยน email, ลบบัญชี, outbox และ retry การส่งอีเมลอัตโนมัติ, login ด้วย Google หรือ GitHub, Turnstile
+ทีมหรือการแชร์ลิงก์, custom domain, วันหมดอายุของลิงก์, สถิติประเทศหรืออุปกรณ์, การชำระเงิน, เปลี่ยน email, ลบบัญชี, outbox และ retry การส่งอีเมลอัตโนมัติ, ยกเลิกการผูกบัญชี OAuth, provider อื่นนอกจาก Google และ GitHub, Turnstile ในหน้า login
 
 ## 8. Assumptions และ open questions
 - ใช้โดเมน `*.workers.dev` (A) และ `*.onrender.com` (B) ไม่ซื้อโดเมน
@@ -111,3 +119,18 @@ P1 รอบเพิ่มระบบเสริม (ตะวันสั่
 QR
 - AC-Q1 Given ลิงก์ในรายการ When กดดาวน์โหลด QR Then ได้ไฟล์ `<code>.svg` และถอดรหัส QR แล้วได้ URL ลิงก์สั้นตรงทุกตัวอักษร
 - AC-Q2 Given ใช้คีย์บอร์ดอย่างเดียว When Tab ไปที่ปุ่ม QR แล้วกด Enter Then ดาวน์โหลดได้ และปุ่มมีชื่อที่ screen reader อ่านได้
+- AC-O1 Given อีเมลใหม่ When login ด้วย Google สำเร็จ Then ได้บัญชีใหม่ `emailVerified: true` มี session และ 302 ไป `/`
+- AC-O2 Given GitHub คืนอีเมลหลายอัน When login ด้วย GitHub Then ใช้เฉพาะอีเมลที่ `primary` และ `verified`
+- AC-O3 Given บัญชีรหัสผ่านเดิมอีเมลเดียวกัน และ provider ยืนยันอีเมลแล้ว When login ด้วย OAuth Then ได้บัญชีเดิม (ลิงก์เดิมยังอยู่)
+- AC-O4 Given provider บอกว่าอีเมลยังไม่ยืนยัน หรือ GitHub ไม่มีอีเมล verified When callback Then ไม่ผูก ไม่สร้างบัญชี 302 `/login?error=oauth`
+- AC-O5 Given state ไม่ตรง cookie, ไม่มี cookie, state ใช้แล้ว หรือหมดอายุ When callback Then 302 `/login?error=oauth` ไม่มี session
+- AC-O6 Given เริ่ม login When ดู authorize URL และ token request Then มี `code_challenge_method=S256`, `redirect_uri` = `<APP_ORIGIN>/api/auth/oauth/<provider>/callback` และ `code_verifier` ตรงกับ challenge
+- AC-O7 Given callback ที่มี `return_to` หรือ URL อื่นใน query When สำเร็จ Then ไป `/` เท่านั้น
+- AC-O8 Given บัญชีที่สร้างจาก OAuth When login ด้วยรหัสผ่านใดๆ Then 401; When ลืมรหัสผ่านแล้วตั้งรหัส Then login ด้วยรหัสใหม่ได้
+- AC-O9 Given login ด้วย (provider, subject) เดิมแต่อีเมลที่ provider ส่งเปลี่ยนไป When callback Then ได้บัญชีเดิม
+- AC-O10 Given ผู้ใช้กดยกเลิกที่หน้า provider (`error=access_denied`) หรือ provider ล่ม When callback Then 302 `/login?error=oauth` ไม่มี 500
+- AC-O11 Given production (ไม่มี `OAUTH_MODE`) When เริ่ม login ด้วย Google Then Location ขึ้นต้นด้วย `https://accounts.google.com/` และ provider อื่นนอกจาก google, github ได้ 404
+- AC-T1 Given ไม่มี captcha หรือ captcha ไม่ผ่าน When สมัครหรือขอลิงก์รีเซ็ต Then 403 `captcha_failed` ไม่สร้างบัญชีและไม่ส่งอีเมล
+- AC-T2 Given captcha ผ่าน When สมัครหรือขอลิงก์รีเซ็ต Then ทำงานตามเดิม
+- AC-T3 Given หน้าสมัครและลืมรหัสผ่าน When เปิดหน้า Then มี widget, CSP เพิ่มเฉพาะ `https://challenges.cloudflare.com`, axe ไม่มี violation
+- AC-W1 Given หน้า login และสมัคร When กดปุ่ม "เข้าสู่ระบบด้วย Google" หรือ "เข้าสู่ระบบด้วย GitHub" Then ไปถึงรายการลิงก์, และ `/login?error=oauth` แสดงข้อความผิดพลาดใน `role="alert"`

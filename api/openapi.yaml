@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: pilot-shortlink API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     สัญญากลางของ backend A (Cloudflare Workers + Rust + D1) และ B (Go + Neon) ทั้งสองต้องผ่าน contract test ชุดเดียวกัน
     Auth ใช้ cookie `__Host-session` (HttpOnly, Secure, SameSite=Lax, Path=/, ไม่มี Domain, 7 วัน prefix `__Host-` บังคับให้ browser รับเฉพาะ cookie ที่ตั้งจาก origin นี้ผ่าน HTTPS) ทุก response ที่ต้อง login ตอบ `Cache-Control: no-store` และหน้า HTML ตอบ `Strict-Transport-Security` request ที่เปลี่ยนข้อมูล (POST, PATCH, DELETE ที่ต้อง login) ต้องมี header `Origin` ตรงกับโดเมนของแอป ไม่มีหรือไม่ตรงตอบ 403 `forbidden_origin` ไม่ประกาศเป็น parameter เพราะ browser ใส่ให้เองและโค้ด frontend ตั้งค่าไม่ได้
@@ -10,6 +10,8 @@ info:
     endpoint ใน `/api/auth/` ที่ไม่ต้อง login (register, login, verify-email, password/*) ตรวจ `Origin` แบบเดียวกัน
     ลิงก์ในอีเมลสร้างจาก `APP_ORIGIN` ใน config: `<APP_ORIGIN>/verify-email?token=<token>` และ `<APP_ORIGIN>/reset-password?token=<token>`
     เมื่อรันด้วย `MAIL_MODE=capture` เท่านั้น backend มี `GET /api/test/mail?to=<email>` สำหรับ contract test (ดู `contract/src/client.ts`) route นี้ไม่อยู่ในสัญญาและบน production ต้องตอบ 404
+    Login ด้วย Google/GitHub ใช้ Authorization Code + PKCE (S256) + state ใช้ครั้งเดียวผูกกับ cookie `__Host-oauth` (HttpOnly, Secure, SameSite=Lax, Path=/, Max-Age=600) `redirect_uri` = `<APP_ORIGIN>/api/auth/oauth/<provider>/callback` ผูกกับบัญชีอีเมลเดียวกันเฉพาะเมื่อ provider ยืนยันอีเมล ตัวระบุบัญชีคือ (provider, subject)
+    `OAUTH_MODE=fake` (ชี้ provider ไป `OAUTH_FAKE_BASE`) และ `TURNSTILE_MODE=fake` (ยอมรับ captcha `fake-pass` เท่านั้น) เปิดได้เฉพาะเมื่อ `APP_ORIGIN` เป็น localhost ใช้กับ contract/e2e เท่านั้น
 servers:
   - url: /
 security:
@@ -23,12 +25,13 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Credentials' }
+            schema: { $ref: '#/components/schemas/RegisterBody' }
       responses:
         '201':
           description: สร้างบัญชีแล้ว
           headers: { Set-Cookie: { $ref: '#/components/headers/SessionCookie' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Invalid' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -91,9 +94,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [email]
+              required: [email, captcha]
               additionalProperties: false
-              properties: { email: { type: string, format: email, maxLength: 254 } }
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                captcha: { $ref: '#/components/schemas/Captcha' }
       responses:
         '204': { description: รับคำขอแล้ว }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -122,6 +127,54 @@ paths:
         '400': { $ref: '#/components/responses/TokenInvalid' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '422': { $ref: '#/components/responses/Invalid' }
+  /api/auth/oauth/{provider}/start:
+    parameters:
+      - $ref: '#/components/parameters/Provider'
+    get:
+      summary: เริ่ม login ด้วย Google หรือ GitHub
+      description: สร้าง state และ PKCE verifier (เก็บ hash ของ state ฝั่ง server อายุ 10 นาที) ตั้ง cookie `__Host-oauth=<state>` แล้วพาไปหน้า authorize ของ provider พร้อม `code_challenge_method=S256`
+      security: []
+      responses:
+        '302':
+          description: ไปหน้า authorize ของ provider
+          headers:
+            Location: { schema: { type: string, format: uri } }
+            Set-Cookie: { schema: { type: string } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/auth/oauth/{provider}/callback:
+    parameters:
+      - $ref: '#/components/parameters/Provider'
+    get:
+      summary: provider พากลับมาหลัง login
+      description: |
+        ตรวจ state กับ cookie `__Host-oauth` ใช้ state ได้ครั้งเดียว แลก code ด้วย `code_verifier` ดึงตัวตน หาบัญชีจาก (provider, subject) ไม่เจอแล้วอีเมลตรงบัญชีเดิมและ provider ยืนยันอีเมล ผูกกับบัญชีนั้น ไม่มีบัญชีสร้างใหม่ (`emailVerified: true`, ไม่มีรหัสผ่าน)
+        สำเร็จ 302 ไป `/` พร้อม cookie session; ผิดพลาดทุกกรณี (state ไม่ตรง, หมดอายุ, ผู้ใช้กดยกเลิก, อีเมลไม่ได้ยืนยัน, provider ล่ม) 302 ไป `/login?error=oauth` ไม่รับ URL ปลายทางจาก query
+      security: []
+      parameters:
+        - { name: code, in: query, schema: { type: string, maxLength: 2048 } }
+        - { name: state, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: error, in: query, schema: { type: string, maxLength: 128 } }
+      responses:
+        '302':
+          description: ไป `/` (สำเร็จ) หรือ `/login?error=oauth`
+          headers:
+            Location: { schema: { type: string, enum: [/, /login?error=oauth] } }
+            Set-Cookie: { schema: { type: string } }
+  /api/config:
+    get:
+      summary: ค่าสาธารณะที่หน้าเว็บต้องใช้
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [turnstileSiteKey]
+                additionalProperties: false
+                properties:
+                  turnstileSiteKey: { type: [string, 'null'], description: null เมื่อรัน `TURNSTILE_MODE=fake` หน้าเว็บส่ง `fake-pass` แทน widget }
   /api/me:
     get:
       summary: ผู้ใช้ปัจจุบัน
@@ -233,7 +286,26 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: '^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$' }
+    Provider:
+      name: provider
+      in: path
+      required: true
+      description: provider อื่นตอบ 404 `not_found`
+      schema: { type: string, enum: [google, github] }
   schemas:
+    Captcha:
+      type: string
+      minLength: 1
+      maxLength: 2048
+      description: token จาก Cloudflare Turnstile widget ตรวจที่ server ด้วย siteverify ใช้ได้ครั้งเดียว ไม่มีหรือไม่ผ่านตอบ 403 `captcha_failed`
+    RegisterBody:
+      type: object
+      required: [email, password, captcha]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 10, maxLength: 128 }
+        captcha: { $ref: '#/components/schemas/Captcha' }
     Credentials:
       type: object
       required: [email, password]
@@ -325,14 +397,14 @@ components:
         detail: { type: string }
         code:
           type: string
-          enum: [unauthorized, forbidden_origin, email_unverified, not_found, email_taken, alias_taken, invalid_url, self_link, invalid_alias, reserved_alias, weak_password, invalid_body, token_invalid, rate_limited, internal_error]
+          enum: [unauthorized, forbidden_origin, email_unverified, not_found, email_taken, alias_taken, invalid_url, self_link, invalid_alias, reserved_alias, weak_password, invalid_body, token_invalid, captcha_failed, rate_limited, internal_error]
         field: { type: string, description: 'ช่องที่ผิด เช่น url, alias, email, password' }
   responses:
     Unauthorized:
       description: ไม่ได้เข้าสู่ระบบ session หมดอายุ หรือ email/รหัสผ่านไม่ถูกต้อง
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     Forbidden:
-      description: Origin ไม่ตรงกับแอป (`forbidden_origin`) หรือยังไม่ได้ยืนยัน email (`email_unverified` เฉพาะ endpoint ที่สร้าง แก้ หรือลบลิงก์)
+      description: Origin ไม่ตรงกับแอป (`forbidden_origin`), ยังไม่ได้ยืนยัน email (`email_unverified` เฉพาะ endpoint ที่สร้าง แก้ หรือลบลิงก์) หรือ captcha ไม่ผ่าน (`captcha_failed` เฉพาะ register และ password/forgot)
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     TokenInvalid:
       description: token ผิด หมดอายุ ใช้แล้ว หรือผิดจุดประสงค์ (`token_invalid` ข้อความเดียวกันทุกกรณี)

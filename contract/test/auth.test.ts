@@ -1,20 +1,20 @@
 // AC1, AC2, AC10 and OWASP A04/A07 (docs/test-plan.md)
 import { describe, expect, it } from "vitest";
-import { anon, BASE_URL, ORIGIN, PASSWORD, problem, registerUser, sessionCookie, uniqueEmail } from "../src/client";
+import { anon, BASE_URL, CAPTCHA, ORIGIN, PASSWORD, problem, registerUser, sessionCookie, uniqueEmail } from "../src/client";
 import createClient from "openapi-fetch";
 import type { paths } from "../src/schema";
 
 describe("register", () => {
   it("AC1: new email + 10-char password returns 201, the user and a session cookie", async () => {
     const email = uniqueEmail();
-    const { data, response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD } });
+    const { data, response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD, captcha: CAPTCHA } });
     expect(response.status).toBe(201);
     expect(data?.email).toBe(email);
     expect(sessionCookie(response)).toMatch(/^__Host-session=[A-Za-z0-9_-]{43}$/); // 32 random bytes, base64url
   });
 
   it("A07: session cookie is HttpOnly, Secure, SameSite=Lax, Path=/, 7 days", async () => {
-    const { response } = await anon().POST("/api/auth/register", { body: { email: uniqueEmail(), password: PASSWORD } });
+    const { response } = await anon().POST("/api/auth/register", { body: { email: uniqueEmail(), password: PASSWORD, captcha: CAPTCHA } });
     const raw = response.headers.getSetCookie().find((c) => c.startsWith("__Host-session="))!;
     const attrs = raw.split(";").map((a) => a.trim().toLowerCase());
     expect(attrs).toEqual(expect.arrayContaining(["httponly", "secure", "samesite=lax", "path=/", "max-age=604800"]));
@@ -22,19 +22,19 @@ describe("register", () => {
 
   it("AC2: an existing email returns 409 email_taken", async () => {
     const { email } = await registerUser();
-    const { response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD } });
+    const { response } = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD, captcha: CAPTCHA } });
     expect(response.status).toBe(409);
     expect((await problem(response)).code).toBe("email_taken");
   });
 
   it("email comparison ignores case", async () => {
     const { email } = await registerUser();
-    const { response } = await anon().POST("/api/auth/register", { body: { email: email.toUpperCase(), password: PASSWORD } });
+    const { response } = await anon().POST("/api/auth/register", { body: { email: email.toUpperCase(), password: PASSWORD, captcha: CAPTCHA } });
     expect(response.status).toBe(409);
   });
 
   it("a password under 10 characters returns 422 weak_password on field password", async () => {
-    const { response } = await anon().POST("/api/auth/register", { body: { email: uniqueEmail(), password: "short" } });
+    const { response } = await anon().POST("/api/auth/register", { body: { email: uniqueEmail(), password: "short", captcha: CAPTCHA } });
     expect(response.status).toBe(422);
     expect(await problem(response)).toMatchObject({ code: "weak_password", field: "password" });
   });
@@ -43,7 +43,7 @@ describe("register", () => {
     const res = await fetch(`${BASE_URL}/api/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Origin: ORIGIN },
-      body: JSON.stringify({ email: uniqueEmail(), password: PASSWORD, isAdmin: true }),
+      body: JSON.stringify({ email: uniqueEmail(), password: PASSWORD, captcha: CAPTCHA, isAdmin: true }),
     });
     expect(res.status).toBe(422);
     expect((await problem(res)).code).toBe("invalid_body");

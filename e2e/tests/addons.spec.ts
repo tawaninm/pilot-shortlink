@@ -75,7 +75,7 @@ test("AC-R web: forgot password from the login page, set a new password, log in 
 
 test("AC-R web: a used reset link shows the error and a way to ask again", async ({ page }) => {
   const email = await register(page);
-  await page.request.post("/api/auth/password/forgot", { data: { email }, headers: { Origin: new URL(page.url()).origin } });
+  await page.request.post("/api/auth/password/forgot", { data: { email, captcha: "fake-pass" }, headers: { Origin: new URL(page.url()).origin } });
   const link = await mailLink(page, email, "/reset-password");
   await page.goto(link);
   await page.getByLabel("รหัสผ่านใหม่", { exact: true }).fill("a-brand-new-passphrase");

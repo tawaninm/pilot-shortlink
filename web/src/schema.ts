@@ -23,7 +23,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["Credentials"];
+                    "application/json": components["schemas"]["RegisterBody"];
                 };
             };
             responses: {
@@ -37,6 +37,7 @@ export interface paths {
                         "application/json": components["schemas"]["Me"];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 409: components["responses"]["Conflict"];
                 422: components["responses"]["Invalid"];
                 429: components["responses"]["RateLimited"];
@@ -236,6 +237,7 @@ export interface paths {
                     "application/json": {
                         /** Format: email */
                         email: string;
+                        captcha: components["schemas"]["Captcha"];
                     };
                 };
             };
@@ -300,6 +302,141 @@ export interface paths {
                 422: components["responses"]["Invalid"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/oauth/{provider}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description provider อื่นตอบ 404 `not_found` */
+                provider: components["parameters"]["Provider"];
+            };
+            cookie?: never;
+        };
+        /**
+         * เริ่ม login ด้วย Google หรือ GitHub
+         * @description สร้าง state และ PKCE verifier (เก็บ hash ของ state ฝั่ง server อายุ 10 นาที) ตั้ง cookie `__Host-oauth=<state>` แล้วพาไปหน้า authorize ของ provider พร้อม `code_challenge_method=S256`
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description provider อื่นตอบ 404 `not_found` */
+                    provider: components["parameters"]["Provider"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description ไปหน้า authorize ของ provider */
+                302: {
+                    headers: {
+                        Location?: string;
+                        "Set-Cookie"?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/oauth/{provider}/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description provider อื่นตอบ 404 `not_found` */
+                provider: components["parameters"]["Provider"];
+            };
+            cookie?: never;
+        };
+        /**
+         * provider พากลับมาหลัง login
+         * @description ตรวจ state กับ cookie `__Host-oauth` ใช้ state ได้ครั้งเดียว แลก code ด้วย `code_verifier` ดึงตัวตน หาบัญชีจาก (provider, subject) ไม่เจอแล้วอีเมลตรงบัญชีเดิมและ provider ยืนยันอีเมล ผูกกับบัญชีนั้น ไม่มีบัญชีสร้างใหม่ (`emailVerified: true`, ไม่มีรหัสผ่าน)
+         *     สำเร็จ 302 ไป `/` พร้อม cookie session; ผิดพลาดทุกกรณี (state ไม่ตรง, หมดอายุ, ผู้ใช้กดยกเลิก, อีเมลไม่ได้ยืนยัน, provider ล่ม) 302 ไป `/login?error=oauth` ไม่รับ URL ปลายทางจาก query
+         */
+        get: {
+            parameters: {
+                query?: {
+                    code?: string;
+                    state?: string;
+                    error?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description provider อื่นตอบ 404 `not_found` */
+                    provider: components["parameters"]["Provider"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description ไป `/` (สำเร็จ) หรือ `/login?error=oauth` */
+                302: {
+                    headers: {
+                        Location?: "/" | "/login?error=oauth";
+                        "Set-Cookie"?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** ค่าสาธารณะที่หน้าเว็บต้องใช้ */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description null เมื่อรัน `TURNSTILE_MODE=fake` หน้าเว็บส่ง `fake-pass` แทน widget */
+                            turnstileSiteKey: string | null;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -618,6 +755,14 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description token จาก Cloudflare Turnstile widget ตรวจที่ server ด้วย siteverify ใช้ได้ครั้งเดียว ไม่มีหรือไม่ผ่านตอบ 403 `captcha_failed` */
+        Captcha: string;
+        RegisterBody: {
+            /** Format: email */
+            email: string;
+            password: string;
+            captcha: components["schemas"]["Captcha"];
+        };
         Credentials: {
             /** Format: email */
             email: string;
@@ -674,7 +819,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthorized" | "forbidden_origin" | "email_unverified" | "not_found" | "email_taken" | "alias_taken" | "invalid_url" | "self_link" | "invalid_alias" | "reserved_alias" | "weak_password" | "invalid_body" | "token_invalid" | "rate_limited" | "internal_error";
+            code: "unauthorized" | "forbidden_origin" | "email_unverified" | "not_found" | "email_taken" | "alias_taken" | "invalid_url" | "self_link" | "invalid_alias" | "reserved_alias" | "weak_password" | "invalid_body" | "token_invalid" | "captcha_failed" | "rate_limited" | "internal_error";
             /** @description ช่องที่ผิด เช่น url, alias, email, password */
             field?: string;
         };
@@ -689,7 +834,7 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description Origin ไม่ตรงกับแอป (`forbidden_origin`) หรือยังไม่ได้ยืนยัน email (`email_unverified` เฉพาะ endpoint ที่สร้าง แก้ หรือลบลิงก์) */
+        /** @description Origin ไม่ตรงกับแอป (`forbidden_origin`), ยังไม่ได้ยืนยัน email (`email_unverified` เฉพาะ endpoint ที่สร้าง แก้ หรือลบลิงก์) หรือ captcha ไม่ผ่าน (`captcha_failed` เฉพาะ register และ password/forgot) */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -748,6 +893,8 @@ export interface components {
     };
     parameters: {
         Code: string;
+        /** @description provider อื่นตอบ 404 `not_found` */
+        Provider: "google" | "github";
     };
     requestBodies: never;
     headers: {
