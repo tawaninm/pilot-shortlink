@@ -56,6 +56,13 @@ describe("authError", () => {
   it("marks a taken email on the email field", () => {
     expect(authError(problem(409, "email_taken"), "register").field).toBe("email");
   });
+
+  it("maps 403 captcha_failed on register to the form alert", () => {
+    expect(authError(problem(403, "captcha_failed"), "register")).toEqual({
+      field: "form",
+      text: "ยืนยันว่าไม่ใช่บอทไม่สำเร็จ ลองอีกครั้ง",
+    });
+  });
 });
 
 describe("account email and password reset messages", () => {
@@ -79,10 +86,14 @@ describe("account email and password reset messages", () => {
     expect(verifyEmailError(new ApiError(0)).tokenInvalid).toBeUndefined();
   });
 
-  it("handles forgot-password rate limit and invalid email", () => {
+  it("handles forgot-password rate limit, captcha_failed, and invalid email", () => {
     expect(forgotPasswordError(problem(429, "rate_limited", 1800))).toEqual({
       field: "form",
       text: "ขอลิงก์บ่อยเกินไป ลองใหม่ใน 30 นาที",
+    });
+    expect(forgotPasswordError(problem(403, "captcha_failed"))).toEqual({
+      field: "form",
+      text: "ยืนยันว่าไม่ใช่บอทไม่สำเร็จ ลองอีกครั้ง",
     });
     expect(forgotPasswordError(problem(422, "invalid_body")).field).toBe("email");
   });

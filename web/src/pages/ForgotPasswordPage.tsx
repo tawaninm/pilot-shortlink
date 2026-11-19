@@ -1,7 +1,8 @@
 import { Link, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useId, useState } from "react";
 import { api, call } from "../api";
-import { type FieldError, forgotPasswordCopy, forgotPasswordError } from "../messages";
+import { authCopy, type FieldError, forgotPasswordCopy, forgotPasswordError } from "../messages";
+import { useTurnstile } from "../useTurnstile";
 
 export function ForgotPasswordPage() {
   const search = useSearch({ strict: false }) as { email?: string };
@@ -9,21 +10,27 @@ export function ForgotPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [sentEmail, setSentEmail] = useState<string | null>(null);
   const [error, setError] = useState<FieldError | null>(null);
+  const turnstile = useTurnstile(true);
   const id = useId();
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (busy) return;
+    if (busy || !turnstile.captcha) return;
     setBusy(true);
     setError(null);
     setSentEmail(null);
     const trimmed = email.trim();
     try {
-      await call(api.POST("/api/auth/password/forgot", { body: { email: trimmed } }));
+      await call(
+        api.POST("/api/auth/password/forgot", {
+          body: { email: trimmed, captcha: turnstile.captcha },
+        }),
+      );
       setSentEmail(trimmed);
     } catch (err) {
       setError(forgotPasswordError(err));
     } finally {
+      turnstile.reset();
       setBusy(false);
     }
   }
@@ -57,9 +64,9 @@ export function ForgotPasswordPage() {
           )}
         </div>
 
-        {formErr && (
+        {(formErr || turnstile.loadError) && (
           <p role="alert" aria-live="polite" className="text-sm text-error">
-            {formErr.text}
+            {formErr?.text ?? authCopy.turnstileLoadError}
           </p>
         )}
 
@@ -73,7 +80,9 @@ export function ForgotPasswordPage() {
           </p>
         )}
 
-        <button type="submit" className="btn btn-primary w-full" disabled={busy}>
+        {turnstile.active && <div ref={turnstile.ref} data-testid="turnstile" />}
+
+        <button type="submit" className="btn btn-primary w-full" disabled={busy || !turnstile.ready}>
           {busy ? forgotPasswordCopy.busy : forgotPasswordCopy.submit}
         </button>
       </form>
