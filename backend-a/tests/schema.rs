@@ -2,6 +2,11 @@
 //! Verifies all 5 tables exist, AC9 (no IP or User-Agent columns on `click_daily`),
 //! and `ON DELETE CASCADE` integrity.
 
+use pilot_shortlink_a::auth::{
+    email_token_expires_at, generate_email_token, hash_email_token, CONSUME_EMAIL_TOKEN_SQL,
+    DELETE_UNUSED_EMAIL_TOKENS_SQL, EMAIL_TOKEN_EXPIRY_SECS, INSERT_EMAIL_TOKEN_SQL,
+};
+use pilot_shortlink_a::mail::TokenPurpose;
 use rusqlite::Connection;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -330,14 +335,21 @@ fn email_tokens_atomic_consumption_and_constraints() {
         "purpose CHECK constraint must reject 'other'"
     );
 
-    // Store a 64-char SHA-256 hex token_hash (never a 43-char plain token).
-    let token_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    // Issue a real verify token using the same generator, hash, expiry constant, and SQL as auth.rs.
+    let raw_token = generate_email_token().expect("generate email token");
+    let token_hash = hash_email_token(&raw_token);
     let t0 = 1_700_000_000_i64;
-    let expires_at = t0 + 1_800;
+    let expires_at = email_token_expires_at(t0);
+    assert_eq!(expires_at, t0 + EMAIL_TOKEN_EXPIRY_SECS);
 
     conn.execute(
-        "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES (?1, 1, 'verify', ?2)",
-        rusqlite::params![token_hash, expires_at],
+        DELETE_UNUSED_EMAIL_TOKENS_SQL,
+        rusqlite::params![1_i64, TokenPurpose::Verify.as_str()],
+    )
+    .expect("delete prior unused verify tokens");
+    conn.execute(
+        INSERT_EMAIL_TOKEN_SQL,
+        rusqlite::params![token_hash, 1_i64, TokenPurpose::Verify.as_str(), expires_at],
     )
     .expect("insert verify token");
 
@@ -349,41 +361,41 @@ fn email_tokens_atomic_consumption_and_constraints() {
         )
         .expect("select stored token_hash");
     assert_eq!(stored_hash.len(), 64);
+    assert_ne!(stored_hash, raw_token);
     assert!(stored_hash
         .chars()
         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 
-    // Expired attempt (at t0 + 1800) fails to consume and does not mark used_at.
-    let expired_attempt: Option<i64> = conn
-        .query_row(
-            "UPDATE email_tokens SET used_at = ?1 \
-             WHERE token_hash = ?2 AND purpose = ?3 AND used_at IS NULL AND expires_at > ?1 \
-             RETURNING user_id",
-            rusqlite::params![expires_at, token_hash, "verify"],
-            |r| r.get(0),
-        )
-        .ok();
-    assert_eq!(expired_attempt, None);
+    // Expired attempts (at exact 30-minute boundary t0 + EMAIL_TOKEN_EXPIRY_SECS and +1s) fail to consume.
+    for expired_now in [expires_at, expires_at + 1] {
+        let expired_attempt: Option<i64> = conn
+            .query_row(
+                CONSUME_EMAIL_TOKEN_SQL,
+                rusqlite::params![expired_now, token_hash, TokenPurpose::Verify.as_str()],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(
+            expired_attempt, None,
+            "token at or past expiry must not be consumed"
+        );
+    }
 
     // Wrong purpose attempt ('reset') fails to consume.
     let wrong_purpose: Option<i64> = conn
         .query_row(
-            "UPDATE email_tokens SET used_at = ?1 \
-             WHERE token_hash = ?2 AND purpose = ?3 AND used_at IS NULL AND expires_at > ?1 \
-             RETURNING user_id",
-            rusqlite::params![t0 + 100, token_hash, "reset"],
+            CONSUME_EMAIL_TOKEN_SQL,
+            rusqlite::params![t0 + 100, token_hash, TokenPurpose::Reset.as_str()],
             |r| r.get(0),
         )
         .ok();
     assert_eq!(wrong_purpose, None);
 
-    // Valid attempt before expiry consumes the token and returns user_id = 1.
+    // Valid attempt 1 second before expiry consumes the token and returns user_id = 1.
     let first_consume: Option<i64> = conn
         .query_row(
-            "UPDATE email_tokens SET used_at = ?1 \
-             WHERE token_hash = ?2 AND purpose = ?3 AND used_at IS NULL AND expires_at > ?1 \
-             RETURNING user_id",
-            rusqlite::params![t0 + 100, token_hash, "verify"],
+            CONSUME_EMAIL_TOKEN_SQL,
+            rusqlite::params![expires_at - 1, token_hash, TokenPurpose::Verify.as_str()],
             |r| r.get(0),
         )
         .ok();
@@ -392,14 +404,60 @@ fn email_tokens_atomic_consumption_and_constraints() {
     // Second attempt with the same token fails because used_at IS NOT NULL.
     let second_consume: Option<i64> = conn
         .query_row(
-            "UPDATE email_tokens SET used_at = ?1 \
-             WHERE token_hash = ?2 AND purpose = ?3 AND used_at IS NULL AND expires_at > ?1 \
-             RETURNING user_id",
-            rusqlite::params![t0 + 101, token_hash, "verify"],
+            CONSUME_EMAIL_TOKEN_SQL,
+            rusqlite::params![t0 + 101, token_hash, TokenPurpose::Verify.as_str()],
             |r| r.get(0),
         )
         .ok();
     assert_eq!(second_consume, None);
+
+    // Issuing a new reset token deletes an earlier unused reset token via DELETE_UNUSED_EMAIL_TOKENS_SQL.
+    let t1 = t0 + 200;
+    let first_reset_hash = hash_email_token(&generate_email_token().expect("first reset token"));
+    let second_reset_hash = hash_email_token(&generate_email_token().expect("second reset token"));
+    conn.execute(
+        INSERT_EMAIL_TOKEN_SQL,
+        rusqlite::params![
+            first_reset_hash,
+            1_i64,
+            TokenPurpose::Reset.as_str(),
+            email_token_expires_at(t1)
+        ],
+    )
+    .expect("insert first reset token");
+    conn.execute(
+        DELETE_UNUSED_EMAIL_TOKENS_SQL,
+        rusqlite::params![1_i64, TokenPurpose::Reset.as_str()],
+    )
+    .expect("delete prior unused reset token");
+    conn.execute(
+        INSERT_EMAIL_TOKEN_SQL,
+        rusqlite::params![
+            second_reset_hash,
+            1_i64,
+            TokenPurpose::Reset.as_str(),
+            email_token_expires_at(t1)
+        ],
+    )
+    .expect("insert second reset token");
+
+    let superseded: Option<i64> = conn
+        .query_row(
+            CONSUME_EMAIL_TOKEN_SQL,
+            rusqlite::params![t1 + 1, first_reset_hash, TokenPurpose::Reset.as_str()],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(superseded, None, "superseded reset token must be deleted");
+
+    let latest_reset: Option<i64> = conn
+        .query_row(
+            CONSUME_EMAIL_TOKEN_SQL,
+            rusqlite::params![t1 + 1, second_reset_hash, TokenPurpose::Reset.as_str()],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(latest_reset, Some(1));
 
     // Deleting user cascades to email_tokens.
     conn.execute("DELETE FROM users WHERE id = 1", [])

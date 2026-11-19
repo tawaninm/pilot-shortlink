@@ -64,9 +64,19 @@ describe("account email and password reset messages", () => {
     expect(resendEmailError(new ApiError(0))).toMatch(/อินเทอร์เน็ต/);
   });
 
-  it("returns the unified alert for invalid verify tokens", () => {
-    expect(verifyEmailError(problem(400, "token_invalid"))).toBe("ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว");
-    expect(verifyEmailError(problem(422, "invalid_body"))).toBe("ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว");
+  it("returns the unified alert for invalid verify tokens and keeps retryable errors distinct", () => {
+    expect(verifyEmailError(problem(400, "token_invalid"))).toEqual({
+      text: "ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว",
+      tokenInvalid: true,
+    });
+    expect(verifyEmailError(problem(422, "invalid_body"))).toEqual({
+      text: "ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว",
+      tokenInvalid: true,
+    });
+    expect(verifyEmailError(problem(503, "unavailable"))).toEqual({
+      text: "ยืนยันไม่สำเร็จ ลองอีกครั้ง",
+    });
+    expect(verifyEmailError(new ApiError(0)).tokenInvalid).toBeUndefined();
   });
 
   it("handles forgot-password rate limit and invalid email", () => {

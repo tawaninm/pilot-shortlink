@@ -4,7 +4,7 @@ import { CaretDown, Check, Copy, QrCode, Trash } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api, call, type LinkSummary, shortUrl } from "../api";
-import { number, qrDownloadLabel } from "../messages";
+import { number, qrDownloadError, qrDownloadLabel } from "../messages";
 import { ConfirmDelete } from "./ConfirmDelete";
 import { LinkStats } from "./LinkStats";
 
@@ -108,7 +108,7 @@ function LinkRow(props: {
   const { link } = props;
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
+  const [rowError, setRowError] = useState("");
   const copyRef = useRef<HTMLButtonElement>(null);
   const statsId = `stats-${link.code}`;
 
@@ -129,14 +129,14 @@ function LinkRow(props: {
         props.onUnverified();
         return;
       }
-      setDeleteError("ลบไม่สำเร็จ ลิงก์ยังใช้งานได้ ลองอีกครั้ง");
+      setRowError("ลบไม่สำเร็จ ลิงก์ยังใช้งานได้ ลองอีกครั้ง");
     }
   }
 
   const actions = (
     <div className="flex justify-end gap-1">
       <CopyButton code={link.code} buttonRef={copyRef} />
-      <QrButton code={link.code} />
+      <QrButton code={link.code} onStart={() => setRowError("")} onError={setRowError} />
       <button
         type="button"
         className="btn btn-quiet px-0"
@@ -144,7 +144,7 @@ function LinkRow(props: {
         disabled={props.unverified}
         aria-describedby={props.unverified ? props.unverifiedBannerId : undefined}
         onClick={() => {
-          setDeleteError("");
+          setRowError("");
           setConfirming(true);
         }}
       >
@@ -182,10 +182,10 @@ function LinkRow(props: {
         </td>
         <td className="py-2 max-sm:hidden">{actions}</td>
       </tr>
-      {deleteError && (
+      {rowError && (
         <tr>
           <td colSpan={5} role="alert" className="pb-2 text-sm text-error">
-            {deleteError}
+            {rowError}
           </td>
         </tr>
       )}
@@ -239,12 +239,21 @@ export function CopyButton({ code, buttonRef }: { code: string; buttonRef?: Reac
   );
 }
 
-function QrButton({ code }: { code: string }) {
+function QrButton({
+  code,
+  onStart,
+  onError,
+}: {
+  code: string;
+  onStart: () => void;
+  onError: (text: string) => void;
+}) {
   const [busy, setBusy] = useState(false);
 
   async function download() {
     if (busy) return;
     setBusy(true);
+    onStart();
     try {
       const { default: qrcode } = await import("qrcode");
       const svg = await qrcode.toString(shortUrl(code), { type: "svg", margin: 2 });
@@ -257,6 +266,8 @@ function QrButton({ code }: { code: string }) {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      onError(qrDownloadError);
     } finally {
       setBusy(false);
     }

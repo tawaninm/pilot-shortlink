@@ -41,7 +41,7 @@ export function ResetPasswordPage() {
       <p className="font-semibold text-muted">ย่อลิงก์</p>
       <h1 className="mt-1 text-xl font-semibold">{resetPasswordCopy.title}</h1>
 
-      {valid ? (
+      {valid && !error?.tokenInvalid ? (
         <form className="mt-6 flex flex-col gap-4" onSubmit={submit} noValidate>
           <PasswordField
             id={`${id}-password`}
@@ -56,12 +56,7 @@ export function ResetPasswordPage() {
 
           {formErr && (
             <p role="alert" aria-live="polite" className="text-sm text-error">
-              {formErr.text}{" "}
-              {formErr.tokenInvalid && (
-                <Link to="/forgot-password" search={{ email: undefined }} className="text-brand underline">
-                  {resetPasswordCopy.requestNewLink}
-                </Link>
-              )}
+              {formErr.text}
             </p>
           )}
 

@@ -59,6 +59,7 @@ export const resetPasswordCopy = {
 } as const;
 
 export const qrDownloadLabel = (code: string) => `ดาวน์โหลด QR ของ /${code}`;
+export const qrDownloadError = "สร้าง QR ไม่สำเร็จ ลองอีกครั้ง";
 
 /** Message for a failed create or edit of a link. */
 export function linkError(err: unknown, alias = ""): FieldError {
@@ -118,17 +119,17 @@ export function resendEmailError(err: unknown): string {
 }
 
 /** Message for a failed email verification attempt. */
-export function verifyEmailError(err: unknown): string {
-  if (!(err instanceof ApiError) || err.status === 0) return NETWORK;
+export function verifyEmailError(err: unknown): { text: string; tokenInvalid?: boolean } {
+  if (!(err instanceof ApiError) || err.status === 0) return { text: NETWORK };
   if (
     err.code === "token_invalid" ||
     err.code === "invalid_body" ||
     err.status === 400 ||
     err.status === 422
   ) {
-    return TOKEN_INVALID;
+    return { text: TOKEN_INVALID, tokenInvalid: true };
   }
-  return "ยืนยันไม่สำเร็จ ลองอีกครั้ง";
+  return { text: "ยืนยันไม่สำเร็จ ลองอีกครั้ง" };
 }
 
 /** Message for a failed forgot-password request. */
