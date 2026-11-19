@@ -1,10 +1,11 @@
-// N1 login and N2 register (docs/design/pages/auth.md, account-email.md, flows.md).
+// N1 login and N2 register (docs/design/pages/auth.md, account-email.md, oauth.md, flows.md).
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
 import { api, call } from "../api";
 import { PasswordField } from "../components/PasswordField";
 import { authCopy, authError, type FieldError } from "../messages";
+import { useTurnstile } from "../useTurnstile";
 
 type Mode = "login" | "register";
 
@@ -35,22 +36,42 @@ export function AuthPage({ mode }: { mode: Mode }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<FieldError | null>(null);
+  const [oauthError, setOauthError] = useState(
+    () => mode === "login" && new URLSearchParams(window.location.search).get("error") === "oauth",
+  );
+  const turnstile = useTurnstile(mode === "register");
   const id = useId();
   const t = copy[mode];
+
+  useEffect(() => {
+    if (mode !== "login") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("error") !== "oauth") return;
+    setOauthError(true);
+    url.searchParams.delete("error");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [mode]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (busy) return;
+    if (mode === "register" && !turnstile.captcha) return;
     setBusy(true);
     setError(null);
+    setOauthError(false);
     try {
-      const body = { email, password };
       const me = await call(
-        mode === "login" ? api.POST("/api/auth/login", { body }) : api.POST("/api/auth/register", { body }),
+        mode === "login"
+          ? api.POST("/api/auth/login", { body: { email, password } })
+          : api.POST("/api/auth/register", {
+              body: { email, password, captcha: turnstile.captcha ?? "" },
+            }),
       );
+      if (mode === "register") turnstile.reset();
       queryClient.setQueryData(["me"], me);
       await navigate({ to: "/" });
     } catch (err) {
+      if (mode === "register") turnstile.reset();
       setError(authError(err, mode));
       setPassword(""); // keep the email, clear the password (flows.md N1)
     } finally {
@@ -66,6 +87,12 @@ export function AuthPage({ mode }: { mode: Mode }) {
     <main className="mx-auto w-full max-w-100 px-4 py-12">
       <p className="font-semibold text-muted">ย่อลิงก์</p>
       <h1 className="mt-1 text-xl font-semibold">{t.title}</h1>
+
+      {oauthError && mode === "login" && (
+        <p role="alert" className="mt-4 rounded-control border border-line-strong p-3 text-sm text-error">
+          {authCopy.oauthError}
+        </p>
+      )}
 
       {search.expired && mode === "login" && (
         <p className="mt-4 rounded-control border border-line-strong p-3 text-sm">{authCopy.expired}</p>
@@ -134,14 +161,37 @@ export function AuthPage({ mode }: { mode: Mode }) {
           </p>
         )}
 
-        <p role="alert" className="text-sm text-error">
-          {formErr?.text}
-        </p>
+        {(formErr || (mode === "register" && turnstile.loadError)) && (
+          <p role="alert" className="text-sm text-error">
+            {formErr?.text ?? authCopy.turnstileLoadError}
+          </p>
+        )}
 
-        <button type="submit" className="btn btn-primary w-full" disabled={busy}>
+        {mode === "register" && turnstile.active && <div ref={turnstile.ref} data-testid="turnstile" />}
+
+        <button
+          type="submit"
+          className="btn btn-primary w-full"
+          disabled={busy || (mode === "register" && !turnstile.ready)}
+        >
           {busy ? t.busy : t.submit}
         </button>
       </form>
+
+      <div className="mt-6 flex items-center gap-3">
+        <div className="h-px flex-1 bg-line" aria-hidden="true" />
+        <span className="text-sm text-muted">{authCopy.oauthDivider}</span>
+        <div className="h-px flex-1 bg-line" aria-hidden="true" />
+      </div>
+
+      <div className="mt-4 flex flex-col gap-3">
+        <a href="/api/auth/oauth/google/start" className="btn btn-quiet w-full border border-line-strong">
+          {authCopy.oauthGoogle}
+        </a>
+        <a href="/api/auth/oauth/github/start" className="btn btn-quiet w-full border border-line-strong">
+          {authCopy.oauthGithub}
+        </a>
+      </div>
 
       <p className="mt-4 text-sm">
         {t.switchText}{" "}

@@ -15,6 +15,7 @@ export type FieldError = { field: "url" | "alias" | "email" | "password" | "form
 
 const NETWORK = "ส่งไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วลองอีกครั้ง";
 const TOKEN_INVALID = "ลิงก์นี้ใช้ไม่ได้แล้ว อาจหมดอายุหรือถูกใช้ไปแล้ว";
+const CAPTCHA_FAILED = "ยืนยันว่าไม่ใช่บอทไม่สำเร็จ ลองอีกครั้ง";
 
 export const authCopy = {
   expired: "หมดเวลาเข้าสู่ระบบ เข้าสู่ระบบอีกครั้งเพื่อทำต่อ",
@@ -23,6 +24,11 @@ export const authCopy = {
   passwordHint: "อย่างน้อย 10 ตัว",
   showPassword: "แสดงรหัส",
   hidePassword: "ซ่อนรหัส",
+  oauthDivider: "หรือ",
+  oauthGoogle: "เข้าสู่ระบบด้วย Google",
+  oauthGithub: "เข้าสู่ระบบด้วย GitHub",
+  oauthError: "เข้าสู่ระบบด้วย Google หรือ GitHub ไม่สำเร็จ ลองอีกครั้งหรือใช้อีเมลและรหัสผ่าน",
+  turnstileLoadError: "โหลดตัวช่วยยืนยันไม่สำเร็จ ลองรีเฟรชหน้า",
 } as const;
 
 export const verifyBannerCopy = {
@@ -101,6 +107,8 @@ export function authError(err: unknown, mode: "login" | "register", now = new Da
       return { field: "password", text: "รหัสผ่านต้องยาว 10-128 ตัว" };
     case "invalid_body":
       return { field: "email", text: "รูปแบบ email ไม่ถูกต้อง" };
+    case "captcha_failed":
+      return { field: "form", text: CAPTCHA_FAILED };
     default:
       return {
         field: "form",
@@ -137,6 +145,9 @@ export function forgotPasswordError(err: unknown): FieldError {
   if (!(err instanceof ApiError) || err.status === 0) return { field: "form", text: NETWORK };
   if (err.code === "rate_limited") {
     return { field: "form", text: `ขอลิงก์บ่อยเกินไป ลองใหม่ใน ${waitMinutes(err.retryAfter)} นาที` };
+  }
+  if (err.code === "captcha_failed") {
+    return { field: "form", text: CAPTCHA_FAILED };
   }
   if (err.code === "invalid_body") {
     return { field: "email", text: "รูปแบบ email ไม่ถูกต้อง" };
