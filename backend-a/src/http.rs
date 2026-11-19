@@ -112,19 +112,17 @@ pub async fn read_bounded_body(
 pub async fn read_json_body(req: &mut Request) -> Result<std::result::Result<Vec<u8>, Response>> {
     match read_bounded_body(req, MAX_JSON_BODY_BYTES).await? {
         Ok(bytes) => Ok(Ok(bytes)),
-        Err(BodyReadError::TooLarge) => {
-            Ok(Err(problem_response(413, "Payload Too Large", "invalid_body")?))
-        }
+        Err(BodyReadError::TooLarge) => Ok(Err(problem_response(
+            413,
+            "Payload Too Large",
+            "invalid_body",
+        )?)),
     }
 }
 
 /// Returns true if a `Content-Type` header value represents an HTML document (`text/html`).
 pub fn is_html_content_type(content_type: &str) -> bool {
-    let media_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim();
+    let media_type = content_type.split(';').next().unwrap_or("").trim();
     media_type.eq_ignore_ascii_case("text/html")
 }
 

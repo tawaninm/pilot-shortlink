@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod http;
 pub mod links;
+pub mod mail;
 pub mod session;
 
 use serde::Serialize;
@@ -15,10 +16,17 @@ pub fn path_pattern(path: &str) -> &'static str {
         "/" => "/",
         "/login" => "/login",
         "/register" => "/register",
+        "/verify-email" => "/verify-email",
+        "/forgot-password" => "/forgot-password",
+        "/reset-password" => "/reset-password",
         "/health" => "/health",
         "/api/auth/register" => "/api/auth/register",
         "/api/auth/login" => "/api/auth/login",
         "/api/auth/logout" => "/api/auth/logout",
+        "/api/auth/verify-email" => "/api/auth/verify-email",
+        "/api/auth/verify-email/resend" => "/api/auth/verify-email/resend",
+        "/api/auth/password/forgot" => "/api/auth/password/forgot",
+        "/api/auth/password/reset" => "/api/auth/password/reset",
         "/api/me" => "/api/me",
         "/api/links" => "/api/links",
         _ if path.starts_with("/api/links/") => {
@@ -54,12 +62,16 @@ pub fn is_session_endpoint(path: &str) -> bool {
             | "/api/links/{code}"
             | "/api/links/{code}/stats"
             | "/api/auth/logout"
+            | "/api/auth/verify-email/resend"
     )
 }
 
 /// Returns `true` if `path` is one of the SPA client-side routes that should return `index.html`.
 pub fn is_spa_route(path: &str) -> bool {
-    matches!(path, "/" | "/login" | "/register")
+    matches!(
+        path,
+        "/" | "/login" | "/register" | "/verify-email" | "/forgot-password" | "/reset-password"
+    )
 }
 
 /// Returns `Some(segment)` if `path` is a single-segment path that is NOT a reserved word
@@ -126,7 +138,11 @@ pub fn format_error_log(error: &str) -> String {
     .expect("InternalErrorLog serialization cannot fail")
 }
 
-async fn route_request(req: &mut Request, env: &Env) -> Result<(Response, Option<u64>)> {
+async fn route_request(
+    req: &mut Request,
+    env: &Env,
+    ctx: &Context,
+) -> Result<(Response, Option<u64>)> {
     let method = req.method();
     let path = req.path();
 
@@ -143,17 +159,42 @@ async fn route_request(req: &mut Request, env: &Env) -> Result<(Response, Option
             return Ok((forbidden, None));
         }
 
+        if method == Method::Get && path == "/api/test/mail" {
+            if let Some(captured_res) = mail::handle_get_captured_mail(req, env)? {
+                return Ok((captured_res, None));
+            }
+            return Ok((http::problem_response(404, "Not Found", "not_found")?, None));
+        }
+
         let db = env.d1("DB")?;
+        let mailer = mail::EnvMailer::from_env(env);
 
         return match (method, path.as_str()) {
-            (Method::Post, "/api/auth/register") => auth::handle_register(req, &db).await,
+            (Method::Post, "/api/auth/register") => {
+                auth::handle_register(req, &db, &app_origin, mailer, ctx).await
+            }
             (Method::Post, "/api/auth/login") => auth::handle_login(req, &db).await,
             (Method::Post, "/api/auth/logout") => Ok((auth::handle_logout(req, &db).await?, None)),
+            (Method::Post, "/api/auth/verify-email") => {
+                Ok((auth::handle_verify_email(req, &db).await?, None))
+            }
+            (Method::Post, "/api/auth/verify-email/resend") => Ok((
+                auth::handle_resend_verify_email(req, &db, &app_origin, mailer, ctx).await?,
+                None,
+            )),
+            (Method::Post, "/api/auth/password/forgot") => Ok((
+                auth::handle_forgot_password(req, &db, &app_origin, mailer, ctx).await?,
+                None,
+            )),
+            (Method::Post, "/api/auth/password/reset") => {
+                auth::handle_reset_password(req, &db).await
+            }
             (Method::Get, "/api/me") => Ok((auth::handle_me(req, &db).await?, None)),
             (Method::Get, "/api/links") => Ok((links::handle_list_links(req, &db).await?, None)),
-            (Method::Post, "/api/links") => {
-                Ok((links::handle_create_link(req, &db, &app_origin).await?, None))
-            }
+            (Method::Post, "/api/links") => Ok((
+                links::handle_create_link(req, &db, &app_origin).await?,
+                None,
+            )),
             (m, p) if p.starts_with("/api/links/") => {
                 let rest = &p["/api/links/".len()..];
                 match (m, rest.split_once('/')) {
@@ -198,12 +239,12 @@ async fn route_request(req: &mut Request, env: &Env) -> Result<(Response, Option
 }
 
 #[event(fetch)]
-pub async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
+pub async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     let start_ms = http::now_ms();
     let method_str = req.method().to_string();
     let raw_path = req.path();
 
-    let (raw_response, hash_ms) = match route_request(&mut req, &env).await {
+    let (raw_response, hash_ms) = match route_request(&mut req, &env, &ctx).await {
         Ok(pair) => pair,
         Err(err) => {
             let err_line = format_error_log(&err.to_string());
@@ -253,6 +294,25 @@ mod tests {
         assert_eq!(path_pattern("/"), "/");
         assert_eq!(path_pattern("/login"), "/login");
         assert_eq!(path_pattern("/register"), "/register");
+        assert_eq!(path_pattern("/verify-email"), "/verify-email");
+        assert_eq!(path_pattern("/forgot-password"), "/forgot-password");
+        assert_eq!(path_pattern("/reset-password"), "/reset-password");
+        assert_eq!(
+            path_pattern("/api/auth/verify-email"),
+            "/api/auth/verify-email"
+        );
+        assert_eq!(
+            path_pattern("/api/auth/verify-email/resend"),
+            "/api/auth/verify-email/resend"
+        );
+        assert_eq!(
+            path_pattern("/api/auth/password/forgot"),
+            "/api/auth/password/forgot"
+        );
+        assert_eq!(
+            path_pattern("/api/auth/password/reset"),
+            "/api/auth/password/reset"
+        );
         assert_eq!(path_pattern("/assets/index-IjLlgpqB.js"), "/assets/*");
         assert_eq!(path_pattern("/abc1234"), "/{code}");
         assert_eq!(path_pattern("/admin"), "/*");
@@ -262,9 +322,13 @@ mod tests {
         assert!(is_session_endpoint("/api/links/my-code"));
         assert!(is_session_endpoint("/api/links/my-code/stats"));
         assert!(is_session_endpoint("/api/auth/logout"));
+        assert!(is_session_endpoint("/api/auth/verify-email/resend"));
 
         assert!(!is_session_endpoint("/api/auth/register"));
         assert!(!is_session_endpoint("/api/auth/login"));
+        assert!(!is_session_endpoint("/api/auth/verify-email"));
+        assert!(!is_session_endpoint("/api/auth/password/forgot"));
+        assert!(!is_session_endpoint("/api/auth/password/reset"));
         assert!(!is_session_endpoint("/health"));
         assert!(!is_session_endpoint("/"));
         assert!(!is_session_endpoint("/abc1234"));
@@ -275,6 +339,9 @@ mod tests {
         assert!(is_spa_route("/"));
         assert!(is_spa_route("/login"));
         assert!(is_spa_route("/register"));
+        assert!(is_spa_route("/verify-email"));
+        assert!(is_spa_route("/forgot-password"));
+        assert!(is_spa_route("/reset-password"));
         assert!(!is_spa_route("/abc1234"));
 
         for reserved in links::RESERVED_ALIASES {
@@ -313,8 +380,7 @@ mod tests {
             r#"{"method":"POST","path":"/api/*","status":404,"ms":1}"#
         );
 
-        let auth_log =
-            format_request_log_with_hash("POST", "/api/auth/login", 200, 60, Some(54));
+        let auth_log = format_request_log_with_hash("POST", "/api/auth/login", 200, 60, Some(54));
         assert_eq!(
             auth_log,
             r#"{"method":"POST","path":"/api/auth/login","status":200,"ms":60,"hash_ms":54}"#

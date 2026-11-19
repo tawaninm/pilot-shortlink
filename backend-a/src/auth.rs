@@ -9,9 +9,10 @@ use crate::http::{
     json_response_with_headers, now_ms, now_sec, problem_field_response, problem_response,
     rate_limited_response, read_json_body,
 };
+use crate::mail::{send_purpose_mail, spawn_purpose_mail, EnvMailer, Mailer, TokenPurpose};
 use crate::session::{
     authenticate_session, clear_session_cookie_header, create_session, delete_session,
-    extract_session_cookie, session_cookie_header,
+    extract_session_cookie, generate_session_token, hash_session_token, session_cookie_header,
 };
 
 /// OWASP minimum Argon2id parameters (ADR-002): m=19456 KiB (19 MiB), t=2, p=1, 32-byte tag.
@@ -30,6 +31,15 @@ pub const DUMMY_PASSWORD_HASH: &str =
 pub const LOGIN_WINDOW_SECS: i64 = 15 * 60;
 pub const LOGIN_MAX_FAILURES: i64 = 5;
 
+/// Fixed 1-hour window (in seconds) and thresholds for email resend and forgot-password rate limiting.
+pub const HOURLY_WINDOW_SECS: i64 = 60 * 60;
+pub const RESEND_MAX_PER_HOUR: i64 = 3;
+pub const FORGOT_MAX_PER_HOUR: i64 = 3;
+
+/// Email token lifetime in seconds (30 minutes) and base64url character length (43 chars).
+pub const EMAIL_TOKEN_EXPIRY_SECS: i64 = 30 * 60;
+pub const EMAIL_TOKEN_LEN: usize = 43;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
@@ -37,9 +47,30 @@ pub struct Credentials {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenBody {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgotPasswordBody {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetPasswordBody {
+    pub token: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct MeResponse<'a> {
     pub email: &'a str,
+    #[serde(rename = "emailVerified")]
+    pub email_verified: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,10 +79,16 @@ struct UserIdRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConsumedTokenRow {
+    user_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct UserAuthRow {
     id: i64,
     email: String,
     password_hash: String,
+    email_verified_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +161,24 @@ pub fn is_valid_password_len(password: &str) -> bool {
     (10..=128).contains(&count)
 }
 
+/// Validates an email token against `^[A-Za-z0-9_-]{43}$` (`api/openapi.yaml` `#/components/schemas/EmailToken`).
+pub fn is_valid_email_token(token: &str) -> bool {
+    token.len() == EMAIL_TOKEN_LEN
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Generates a 43-character unpadded base64url email token from 32 CSPRNG bytes.
+pub fn generate_email_token() -> std::result::Result<String, String> {
+    generate_session_token()
+}
+
+/// Computes the 64-character lowercase hex SHA-256 digest of an email token.
+pub fn hash_email_token(token: &str) -> String {
+    hash_session_token(token)
+}
+
 /// Computes `(window_start, retry_after_secs)` for the fixed 15-minute login rate-limit window.
 pub fn login_window(now_sec: i64) -> (i64, i64) {
     let window_start = (now_sec / LOGIN_WINDOW_SECS) * LOGIN_WINDOW_SECS;
@@ -131,7 +186,19 @@ pub fn login_window(now_sec: i64) -> (i64, i64) {
     (window_start, retry_after)
 }
 
-async fn consume_login_rate_limit(db: &D1Database, key: &str, window_start: i64) -> Result<i64> {
+/// Computes `(window_start, retry_after_secs)` for the fixed 1-hour email rate-limit window.
+pub fn hourly_window(now_sec: i64) -> (i64, i64) {
+    let window_start = (now_sec / HOURLY_WINDOW_SECS) * HOURLY_WINDOW_SECS;
+    let retry_after = ((window_start + HOURLY_WINDOW_SECS) - now_sec).max(1);
+    (window_start, retry_after)
+}
+
+async fn consume_rate_limit(
+    db: &D1Database,
+    key: &str,
+    window_start: i64,
+    now_sec: i64,
+) -> Result<i64> {
     let row = db
         .prepare(
             "INSERT INTO rate_limits (key, window_start, count) VALUES (?1, ?2, 1) \
@@ -145,9 +212,10 @@ async fn consume_login_rate_limit(db: &D1Database, key: &str, window_start: i64)
         .first::<CountRow>(None)
         .await?;
 
-    // Clean up expired rate_limits windows on write (docs/architecture.md section 5).
+    // Clean up rate_limits windows older than the longest window horizon (1 hour).
+    let cleanup_cutoff = now_sec - HOURLY_WINDOW_SECS;
     db.prepare("DELETE FROM rate_limits WHERE window_start < ?1")
-        .bind(&[wasm_bindgen::JsValue::from_f64(window_start as f64)])?
+        .bind(&[wasm_bindgen::JsValue::from_f64(cleanup_cutoff as f64)])?
         .run()
         .await?;
 
@@ -162,10 +230,175 @@ async fn clear_login_rate_limit(db: &D1Database, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Issues a new single-use 30-minute email token for `(user_id, purpose)` in D1:
+/// first deletes any unused tokens of the same user and purpose, then inserts the new SHA-256 hash.
+/// Returns `(raw_token, token_hash)`.
+pub async fn issue_email_token(
+    db: &D1Database,
+    user_id: i64,
+    purpose: TokenPurpose,
+    now_sec: i64,
+) -> Result<(String, String)> {
+    let token = generate_email_token().map_err(Error::RustError)?;
+    let token_hash = hash_email_token(&token);
+    let expires_at = now_sec + EMAIL_TOKEN_EXPIRY_SECS;
+
+    let del_stmt = db
+        .prepare("DELETE FROM email_tokens WHERE user_id = ?1 AND purpose = ?2 AND used_at IS NULL")
+        .bind(&[
+            wasm_bindgen::JsValue::from_f64(user_id as f64),
+            purpose.as_str().into(),
+        ])?;
+
+    let ins_stmt = db
+        .prepare(
+            "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(&[
+            token_hash.as_str().into(),
+            wasm_bindgen::JsValue::from_f64(user_id as f64),
+            purpose.as_str().into(),
+            wasm_bindgen::JsValue::from_f64(expires_at as f64),
+        ])?;
+
+    db.batch(vec![del_stmt, ins_stmt]).await?;
+    Ok((token, token_hash))
+}
+
+/// Atomically consumes a token for `purpose` in ONE statement:
+/// `UPDATE email_tokens SET used_at = ? WHERE token_hash = ? AND purpose = ? AND used_at IS NULL AND expires_at > ? RETURNING user_id`.
+/// Returns `Ok(Some(user_id))` if consumed, or `Ok(None)` if unknown, used, expired, or wrong purpose.
+pub async fn consume_email_token(
+    db: &D1Database,
+    raw_token: &str,
+    purpose: TokenPurpose,
+    now_sec: i64,
+) -> Result<Option<i64>> {
+    let token_hash = hash_email_token(raw_token);
+    let row = db
+        .prepare(
+            "UPDATE email_tokens \
+             SET used_at = ?1 \
+             WHERE token_hash = ?2 \
+               AND purpose = ?3 \
+               AND used_at IS NULL \
+               AND expires_at > ?1 \
+             RETURNING user_id",
+        )
+        .bind(&[
+            wasm_bindgen::JsValue::from_f64(now_sec as f64),
+            token_hash.as_str().into(),
+            purpose.as_str().into(),
+        ])?
+        .first::<ConsumedTokenRow>(None)
+        .await?;
+
+    Ok(row.map(|r| r.user_id))
+}
+
+/// Pure helper that builds the 201 registration response payload and invokes `mailer`.
+/// Even if `mailer` fails, registration succeeds with `emailVerified: false` and the session cookie.
+pub async fn complete_registration_with_mailer<M: Mailer>(
+    email: &str,
+    session_token: &str,
+    verify_token: &str,
+    verify_token_hash: &str,
+    app_origin: &str,
+    mailer: &M,
+) -> std::result::Result<(u16, String, String, String), String> {
+    let cookie = session_cookie_header(session_token);
+    let body = serde_json::to_string(&MeResponse {
+        email,
+        email_verified: false,
+    })
+    .map_err(|e| e.to_string())?;
+    let log_line = send_purpose_mail(
+        mailer,
+        TokenPurpose::Verify,
+        email,
+        app_origin,
+        verify_token,
+        verify_token_hash,
+    )
+    .await;
+    Ok((201, body, cookie, log_line))
+}
+
+/// Clock-injected in-memory token store mirroring the D1 `email_tokens` table invariants
+/// for deterministic unit testing of token expiry, single-use, purpose isolation, and rotation.
+#[derive(Debug, Default)]
+pub struct ClockEmailTokenStore {
+    rows: Vec<EmailTokenEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct EmailTokenEntry {
+    token_hash: String,
+    user_id: i64,
+    purpose: TokenPurpose,
+    expires_at: i64,
+    used_at: Option<i64>,
+}
+
+impl ClockEmailTokenStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Issues a new token for `(user_id, purpose)` at `clock()`, deleting any prior unused tokens
+    /// for the same `(user_id, purpose)`.
+    pub fn issue(
+        &mut self,
+        user_id: i64,
+        purpose: TokenPurpose,
+        clock: impl FnOnce() -> i64,
+    ) -> std::result::Result<(String, String), String> {
+        let now = clock();
+        let token = generate_email_token()?;
+        let token_hash = hash_email_token(&token);
+        let expires_at = now + EMAIL_TOKEN_EXPIRY_SECS;
+
+        self.rows
+            .retain(|r| !(r.user_id == user_id && r.purpose == purpose && r.used_at.is_none()));
+        self.rows.push(EmailTokenEntry {
+            token_hash: token_hash.clone(),
+            user_id,
+            purpose,
+            expires_at,
+            used_at: None,
+        });
+        Ok((token, token_hash))
+    }
+
+    /// Consumes `raw_token` for `purpose` at `clock()`. Returns `Some(user_id)` only if the token
+    /// exists, matches `purpose`, has `used_at == None`, and has `expires_at > clock()`.
+    pub fn consume(
+        &mut self,
+        raw_token: &str,
+        purpose: TokenPurpose,
+        clock: impl FnOnce() -> i64,
+    ) -> Option<i64> {
+        let now = clock();
+        let token_hash = hash_email_token(raw_token);
+        let entry = self.rows.iter_mut().find(|r| {
+            r.token_hash == token_hash
+                && r.purpose == purpose
+                && r.used_at.is_none()
+                && r.expires_at > now
+        })?;
+        entry.used_at = Some(now);
+        Some(entry.user_id)
+    }
+}
+
 /// `POST /api/auth/register`
 pub async fn handle_register(
     req: &mut Request,
     db: &D1Database,
+    app_origin: &str,
+    mailer: EnvMailer,
+    ctx: &Context,
 ) -> Result<(Response, Option<u64>)> {
     let raw_body = match read_json_body(req).await? {
         Ok(bytes) => bytes,
@@ -213,24 +446,39 @@ pub async fn handle_register(
         ));
     };
 
-    let token = create_session(db, user.id, now_sec()).await?;
-    let cookie = session_cookie_header(&token);
-    let body = serde_json::to_string(&MeResponse { email: &email })?;
+    let now = now_sec();
+    let session_token = create_session(db, user.id, now).await?;
+    let cookie = session_cookie_header(&session_token);
+    let body = serde_json::to_string(&MeResponse {
+        email: &email,
+        email_verified: false,
+    })?;
 
-    let res = json_response_with_headers(
-        201,
-        "application/json",
-        body,
-        &[("Set-Cookie", &cookie)],
-    )?;
+    match issue_email_token(db, user.id, TokenPurpose::Verify, now).await {
+        Ok((verify_token, verify_token_hash)) => {
+            spawn_purpose_mail(
+                ctx,
+                mailer,
+                TokenPurpose::Verify,
+                email,
+                app_origin.to_string(),
+                verify_token,
+                verify_token_hash,
+            );
+        }
+        Err(err) => {
+            let err_line = crate::format_error_log(&err.to_string());
+            console_error!("{err_line}");
+        }
+    }
+
+    let res =
+        json_response_with_headers(201, "application/json", body, &[("Set-Cookie", &cookie)])?;
     Ok((res, Some(hash_ms)))
 }
 
 /// `POST /api/auth/login`
-pub async fn handle_login(
-    req: &mut Request,
-    db: &D1Database,
-) -> Result<(Response, Option<u64>)> {
+pub async fn handle_login(req: &mut Request, db: &D1Database) -> Result<(Response, Option<u64>)> {
     let raw_body = match read_json_body(req).await? {
         Ok(bytes) => bytes,
         Err(res) => return Ok((res, None)),
@@ -261,13 +509,13 @@ pub async fn handle_login(
     let rate_key = format!("login:{email}");
 
     // Increment rate-limit bucket atomically FIRST; if count > 5, answer 429 without running Argon2.
-    let attempt_count = consume_login_rate_limit(db, &rate_key, window_start).await?;
+    let attempt_count = consume_rate_limit(db, &rate_key, window_start, now).await?;
     if attempt_count > LOGIN_MAX_FAILURES {
         return Ok((rate_limited_response(retry_after)?, None));
     }
 
     let user = db
-        .prepare("SELECT id, email, password_hash FROM users WHERE email = ?1")
+        .prepare("SELECT id, email, password_hash, email_verified_at FROM users WHERE email = ?1")
         .bind(&[email.as_str().into()])?
         .first::<UserAuthRow>(None)
         .await?;
@@ -282,7 +530,10 @@ pub async fn handle_login(
             clear_login_rate_limit(db, &rate_key).await?;
             let token = create_session(db, u.id, now).await?;
             let cookie = session_cookie_header(&token);
-            let body = serde_json::to_string(&MeResponse { email: &u.email })?;
+            let body = serde_json::to_string(&MeResponse {
+                email: &u.email,
+                email_verified: u.email_verified_at.is_some(),
+            })?;
             let res = json_response_with_headers(
                 200,
                 "application/json",
@@ -315,14 +566,242 @@ pub async fn handle_me(req: &Request, db: &D1Database) -> Result<Response> {
     let Some(user) = authenticate_session(req, db, now_sec()).await? else {
         return problem_response(401, "Unauthorized", "unauthorized");
     };
-    let body = serde_json::to_string(&MeResponse { email: &user.email })?;
+    let body = serde_json::to_string(&MeResponse {
+        email: &user.email,
+        email_verified: user.is_email_verified(),
+    })?;
     crate::http::json_response(200, "application/json", body)
+}
+
+/// `POST /api/auth/verify-email`
+pub async fn handle_verify_email(req: &mut Request, db: &D1Database) -> Result<Response> {
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok(res),
+    };
+    let Ok(payload) = serde_json::from_slice::<TokenBody>(&raw_body) else {
+        return problem_response(422, "Unprocessable Entity", "invalid_body");
+    };
+    if !is_valid_email_token(&payload.token) {
+        return problem_field_response(422, "Unprocessable Entity", "invalid_body", "token");
+    }
+
+    let now = now_sec();
+    let Some(user_id) = consume_email_token(db, &payload.token, TokenPurpose::Verify, now).await?
+    else {
+        return problem_response(400, "Bad Request", "token_invalid");
+    };
+
+    db.prepare(
+        "UPDATE users \
+         SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+         WHERE id = ?1",
+    )
+    .bind(&[wasm_bindgen::JsValue::from_f64(user_id as f64)])?
+    .run()
+    .await?;
+
+    Ok(Response::empty()?.with_status(204))
+}
+
+/// `POST /api/auth/verify-email/resend`
+pub async fn handle_resend_verify_email(
+    req: &Request,
+    db: &D1Database,
+    app_origin: &str,
+    mailer: EnvMailer,
+    ctx: &Context,
+) -> Result<Response> {
+    let now = now_sec();
+    let Some(user) = authenticate_session(req, db, now).await? else {
+        return problem_response(401, "Unauthorized", "unauthorized");
+    };
+
+    if user.is_email_verified() {
+        return Ok(Response::empty()?.with_status(204));
+    }
+
+    let (window_start, retry_after) = hourly_window(now);
+    let rate_key = format!("resend:{}", user.id);
+    let count = consume_rate_limit(db, &rate_key, window_start, now).await?;
+    if count > RESEND_MAX_PER_HOUR {
+        return rate_limited_response(retry_after);
+    }
+
+    let (token, token_hash) = issue_email_token(db, user.id, TokenPurpose::Verify, now).await?;
+    spawn_purpose_mail(
+        ctx,
+        mailer,
+        TokenPurpose::Verify,
+        user.email,
+        app_origin.to_string(),
+        token,
+        token_hash,
+    );
+
+    Ok(Response::empty()?.with_status(204))
+}
+
+/// `POST /api/auth/password/forgot`
+pub async fn handle_forgot_password(
+    req: &mut Request,
+    db: &D1Database,
+    app_origin: &str,
+    mailer: EnvMailer,
+    ctx: &Context,
+) -> Result<Response> {
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok(res),
+    };
+    let Ok(payload) = serde_json::from_slice::<ForgotPasswordBody>(&raw_body) else {
+        return problem_response(422, "Unprocessable Entity", "invalid_body");
+    };
+
+    let email = normalize_email(&payload.email);
+    if !is_valid_email(&email) {
+        return problem_field_response(422, "Unprocessable Entity", "invalid_body", "email");
+    }
+
+    let now = now_sec();
+    let (window_start, retry_after) = hourly_window(now);
+    let rate_key = format!("forgot:{email}");
+    let count = consume_rate_limit(db, &rate_key, window_start, now).await?;
+    if count > FORGOT_MAX_PER_HOUR {
+        return rate_limited_response(retry_after);
+    }
+
+    let user = db
+        .prepare("SELECT id FROM users WHERE email = ?1")
+        .bind(&[email.as_str().into()])?
+        .first::<UserIdRow>(None)
+        .await?;
+
+    if let Some(u) = user {
+        match issue_email_token(db, u.id, TokenPurpose::Reset, now).await {
+            Ok((token, token_hash)) => {
+                spawn_purpose_mail(
+                    ctx,
+                    mailer,
+                    TokenPurpose::Reset,
+                    email,
+                    app_origin.to_string(),
+                    token,
+                    token_hash,
+                );
+            }
+            Err(err) => {
+                let err_line = crate::format_error_log(&err.to_string());
+                console_error!("{err_line}");
+            }
+        }
+    }
+
+    Ok(Response::empty()?.with_status(204))
+}
+
+/// `POST /api/auth/password/reset`
+pub async fn handle_reset_password(
+    req: &mut Request,
+    db: &D1Database,
+) -> Result<(Response, Option<u64>)> {
+    let raw_body = match read_json_body(req).await? {
+        Ok(bytes) => bytes,
+        Err(res) => return Ok((res, None)),
+    };
+    let Ok(payload) = serde_json::from_slice::<ResetPasswordBody>(&raw_body) else {
+        return Ok((
+            problem_response(422, "Unprocessable Entity", "invalid_body")?,
+            None,
+        ));
+    };
+
+    // Validate password FIRST so a weak password returns 422 weak_password without consuming the token (AC-R7).
+    if !is_valid_password_len(&payload.password) {
+        return Ok((
+            problem_field_response(422, "Unprocessable Entity", "weak_password", "password")?,
+            None,
+        ));
+    }
+    if !is_valid_email_token(&payload.token) {
+        return Ok((
+            problem_field_response(422, "Unprocessable Entity", "invalid_body", "token")?,
+            None,
+        ));
+    }
+
+    let now = now_sec();
+    let Some(user_id) = consume_email_token(db, &payload.token, TokenPurpose::Reset, now).await?
+    else {
+        return Ok((problem_response(400, "Bad Request", "token_invalid")?, None));
+    };
+
+    let (password_hash, hash_ms) =
+        hash_password_argon2id(&payload.password).map_err(Error::RustError)?;
+
+    let update_user = db
+        .prepare(
+            "UPDATE users \
+             SET password_hash = ?1, \
+                 email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+             WHERE id = ?2",
+        )
+        .bind(&[
+            password_hash.as_str().into(),
+            wasm_bindgen::JsValue::from_f64(user_id as f64),
+        ])?;
+
+    let delete_sessions = db
+        .prepare("DELETE FROM sessions WHERE user_id = ?1")
+        .bind(&[wasm_bindgen::JsValue::from_f64(user_id as f64)])?;
+
+    db.batch(vec![update_user, delete_sessions]).await?;
+
+    Ok((Response::empty()?.with_status(204), Some(hash_ms)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mail::MailSendError;
     use argon2::password_hash::phc::PasswordHash;
+    use std::cell::Cell;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
+
+    fn block_on_ready<F: Future>(mut fut: F) -> F::Output {
+        fn noop_raw_waker() -> RawWaker {
+            fn no_op(_: *const ()) {}
+            fn clone(_: *const ()) -> RawWaker {
+                noop_raw_waker()
+            }
+            static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
+        let mut ctx = TaskContext::from_waker(&waker);
+        let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        match pinned.poll(&mut ctx) {
+            Poll::Ready(val) => val,
+            Poll::Pending => panic!("test future must resolve immediately"),
+        }
+    }
+
+    struct FailingTestMailer(MailSendError);
+
+    impl Mailer for FailingTestMailer {
+        async fn send(
+            &self,
+            _to: &str,
+            _subject: &str,
+            _text: &str,
+            _html: &str,
+            _idempotency_key: &str,
+        ) -> std::result::Result<(), MailSendError> {
+            Err(self.0)
+        }
+    }
 
     #[test]
     fn argon2id_phc_format_and_verification() {
@@ -351,13 +830,23 @@ mod tests {
     }
 
     #[test]
-    fn credentials_rejects_unknown_fields() {
+    fn credentials_and_token_bodies_reject_unknown_fields() {
         let raw = br#"{"email":"a@example.com","password":"correct-horse-battery","isAdmin":true}"#;
         assert!(serde_json::from_slice::<Credentials>(raw).is_err());
+
+        let extra_token = br#"{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","extra":1}"#;
+        assert!(serde_json::from_slice::<TokenBody>(extra_token).is_err());
+
+        let extra_forgot = br#"{"email":"a@example.com","extra":1}"#;
+        assert!(serde_json::from_slice::<ForgotPasswordBody>(extra_forgot).is_err());
+
+        let extra_reset =
+            br#"{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","password":"correct-horse-battery","extra":1}"#;
+        assert!(serde_json::from_slice::<ResetPasswordBody>(extra_reset).is_err());
     }
 
     #[test]
-    fn password_and_email_validation() {
+    fn password_email_and_token_validation() {
         assert!(!is_valid_password_len("short"));
         assert!(is_valid_password_len("1234567890"));
         assert!(is_valid_password_len(&"a".repeat(128)));
@@ -368,10 +857,17 @@ mod tests {
         assert!(!is_valid_email("not-an-email"));
         assert!(!is_valid_email("@example.com"));
         assert!(!is_valid_email("alice@"));
+
+        let valid_tok = generate_email_token().expect("generate email token");
+        assert!(is_valid_email_token(&valid_tok));
+        assert!(!is_valid_email_token("short"));
+        assert!(!is_valid_email_token(&"A".repeat(42)));
+        assert!(!is_valid_email_token(&"A".repeat(44)));
+        assert!(!is_valid_email_token(&format!("{}+", "A".repeat(42))));
     }
 
     #[test]
-    fn login_window_calculates_fixed_15_min_bucket_and_retry_after() {
+    fn login_and_hourly_windows_calculate_fixed_buckets_and_retry_after() {
         let (start, retry) = login_window(1_800_005);
         assert_eq!(start, 1_800_000);
         assert_eq!(retry, 895);
@@ -379,5 +875,112 @@ mod tests {
         let (start_edge, retry_edge) = login_window(1_800_899);
         assert_eq!(start_edge, 1_800_000);
         assert_eq!(retry_edge, 1);
+
+        let (h_start, h_retry) = hourly_window(3_600_100);
+        assert_eq!(h_start, 3_600_000);
+        assert_eq!(h_retry, 3_500);
+    }
+
+    #[test]
+    fn token_expiry_with_injected_clock_rejects_expired_used_and_superseded_tokens() {
+        let now = Cell::new(1_700_000_000_i64);
+        let clock = || now.get();
+        let mut store = ClockEmailTokenStore::new();
+
+        // Issue a verify token at t0; expires at t0 + 1800 (30 minutes).
+        let (expired_token, _) = store
+            .issue(42, TokenPurpose::Verify, clock)
+            .expect("issue token");
+
+        // Advance injected clock to exact 30-minute boundary (t0 + 1800) and past it (t0 + 1801).
+        now.set(1_700_000_000 + EMAIL_TOKEN_EXPIRY_SECS);
+        assert_eq!(
+            store.consume(&expired_token, TokenPurpose::Verify, clock),
+            None,
+            "token at 30-minute expiry boundary must not be consumed"
+        );
+        now.set(1_700_000_000 + EMAIL_TOKEN_EXPIRY_SECS + 1);
+        assert_eq!(
+            store.consume(&expired_token, TokenPurpose::Verify, clock),
+            None,
+            "expired token after 30 minutes must not be consumed"
+        );
+
+        // Issue a new verify token at current clock; consume 1 second before expiry -> succeeds once.
+        let t1 = clock();
+        let (valid_token, _) = store
+            .issue(42, TokenPurpose::Verify, clock)
+            .expect("issue second token");
+        now.set(t1 + EMAIL_TOKEN_EXPIRY_SECS - 1);
+        assert_eq!(
+            store.consume(&valid_token, TokenPurpose::Verify, clock),
+            Some(42),
+            "unexpired token must be consumed once"
+        );
+        assert_eq!(
+            store.consume(&valid_token, TokenPurpose::Verify, clock),
+            None,
+            "already-used token must not be consumed a second time"
+        );
+
+        // Issuing a new token supersedes an unused earlier token of the same purpose.
+        let (first_reset, _) = store
+            .issue(42, TokenPurpose::Reset, clock)
+            .expect("issue first reset");
+        let (second_reset, _) = store
+            .issue(42, TokenPurpose::Reset, clock)
+            .expect("issue second reset");
+        assert_eq!(
+            store.consume(&first_reset, TokenPurpose::Reset, clock),
+            None,
+            "superseded token must be invalidated"
+        );
+        assert_eq!(
+            store.consume(&second_reset, TokenPurpose::Verify, clock),
+            None,
+            "reset token must not verify email"
+        );
+        assert_eq!(
+            store.consume(&second_reset, TokenPurpose::Reset, clock),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn failing_mailer_does_not_fail_registration_logic() {
+        let email = "newuser@example.test";
+        let session_tok = generate_session_token().expect("session token");
+        let verify_tok = generate_email_token().expect("verify token");
+        let verify_hash = hash_email_token(&verify_tok);
+
+        for err in [
+            MailSendError::HttpStatus(500),
+            MailSendError::HttpStatus(429),
+            MailSendError::MissingApiKey,
+            MailSendError::Transport,
+        ] {
+            let mailer = FailingTestMailer(err);
+            let (status, body, cookie, log_line) =
+                block_on_ready(complete_registration_with_mailer(
+                    email,
+                    &session_tok,
+                    &verify_tok,
+                    &verify_hash,
+                    "http://localhost:8787",
+                    &mailer,
+                ))
+                .expect("registration must succeed even when mailer fails");
+
+            assert_eq!(status, 201);
+            assert!(cookie.starts_with("__Host-session="));
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+            assert_eq!(parsed["email"], email);
+            assert_eq!(parsed["emailVerified"], false);
+
+            assert!(!log_line.contains(&verify_tok));
+            assert!(!log_line.contains(&verify_hash));
+            assert!(!log_line.contains(email));
+            assert!(log_line.contains(r#""result":"failed""#));
+        }
     }
 }
