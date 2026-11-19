@@ -13,6 +13,13 @@ pub const SESSION_TOKEN_BYTES: usize = 32;
 pub struct SessionUser {
     pub id: i64,
     pub email: String,
+    pub email_verified_at: Option<String>,
+}
+
+impl SessionUser {
+    pub fn is_email_verified(&self) -> bool {
+        self.email_verified_at.is_some()
+    }
 }
 
 /// Generates a 43-character unpadded base64url token from 32 CSPRNG bytes.
@@ -103,7 +110,7 @@ pub async fn authenticate_session(
 
     let user = db
         .prepare(
-            "SELECT u.id AS id, u.email AS email \
+            "SELECT u.id AS id, u.email AS email, u.email_verified_at AS email_verified_at \
              FROM sessions s \
              JOIN users u ON u.id = s.user_id \
              WHERE s.token_hash = ?1 AND s.expires_at > ?2",
@@ -151,7 +158,9 @@ mod tests {
         let header = session_cookie_header(&token);
         assert_eq!(
             header,
-            format!("__Host-session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800")
+            format!(
+                "__Host-session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800"
+            )
         );
         assert!(!header.to_ascii_lowercase().contains("domain="));
         assert_eq!(

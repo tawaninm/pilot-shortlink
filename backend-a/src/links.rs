@@ -11,8 +11,8 @@ use crate::session::authenticate_session;
 pub const CREATE_WINDOW_SECS: i64 = 60;
 pub const CREATE_MAX_LINKS: i64 = 30;
 
-/// Retention horizon for cleaning up expired rate_limits buckets (covers 15-min login windows).
-const RATE_LIMIT_CLEANUP_RETENTION_SECS: i64 = 15 * 60;
+/// Retention horizon for cleaning up expired rate_limits buckets (covers 1-hour email windows).
+const RATE_LIMIT_CLEANUP_RETENTION_SECS: i64 = 60 * 60;
 
 /// Maximum allowed length of a target URL (`api/openapi.yaml` `#/components/schemas/TargetUrl`).
 pub const MAX_URL_LEN: usize = 2048;
@@ -33,7 +33,19 @@ const UNBIASED_THRESHOLD: u8 = 252;
 
 /// Reserved aliases that cannot be registered (`docs/requirements.md` section 4).
 pub const RESERVED_ALIASES: &[&str] = &[
-    "api", "app", "admin", "login", "logout", "register", "static", "assets", "health", "openapi",
+    "api",
+    "app",
+    "admin",
+    "login",
+    "logout",
+    "register",
+    "static",
+    "assets",
+    "health",
+    "openapi",
+    "verify-email",
+    "forgot-password",
+    "reset-password",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,7 +332,11 @@ pub fn create_window(now_sec: i64) -> (i64, i64) {
     (window_start, retry_after)
 }
 
-async fn consume_create_rate_limit(db: &D1Database, user_id: i64, now_sec: i64) -> Result<Option<i64>> {
+async fn consume_create_rate_limit(
+    db: &D1Database,
+    user_id: i64,
+    now_sec: i64,
+) -> Result<Option<i64>> {
     let (window_start, retry_after) = create_window(now_sec);
     let key = format!("create:{user_id}");
 
@@ -387,6 +403,21 @@ fn alias_error_response(err: AliasValidationError) -> Result<Response> {
     problem_field_response(422, "Unprocessable Entity", code, "alias")
 }
 
+/// Shared helper for mutating link endpoints (`POST /api/links`, `PATCH /api/links/{code}`,
+/// `DELETE /api/links/{code}`): returns `Some(403 email_unverified)` when the authenticated user
+/// has not verified their email address (AC-V4).
+pub fn require_verified_user(user: &crate::session::SessionUser) -> Result<Option<Response>> {
+    if user.is_email_verified() {
+        Ok(None)
+    } else {
+        Ok(Some(problem_response(
+            403,
+            "Forbidden",
+            "email_unverified",
+        )?))
+    }
+}
+
 /// `POST /api/links`
 pub async fn handle_create_link(
     req: &mut Request,
@@ -402,6 +433,9 @@ pub async fn handle_create_link(
     let Some(user) = authenticate_session(req, db, now).await? else {
         return problem_response(401, "Unauthorized", "unauthorized");
     };
+    if let Some(unverified) = require_verified_user(&user)? {
+        return Ok(unverified);
+    }
 
     if let Some(retry_after) = consume_create_rate_limit(db, user.id, now).await? {
         return rate_limited_response(retry_after);
@@ -529,7 +563,9 @@ async fn load_link_click_summary(
     now_sec: i64,
 ) -> Result<(i64, Vec<i64>)> {
     let total_row = db
-        .prepare("SELECT COALESCE(SUM(clicks), 0) AS clicks_total FROM click_daily WHERE link_id = ?1")
+        .prepare(
+            "SELECT COALESCE(SUM(clicks), 0) AS clicks_total FROM click_daily WHERE link_id = ?1",
+        )
         .bind(&[wasm_bindgen::JsValue::from_f64(link_id as f64)])?
         .first::<TotalClicksRow>(None)
         .await?;
@@ -581,6 +617,9 @@ pub async fn handle_patch_link(
     let Some(user) = authenticate_session(req, db, now).await? else {
         return problem_response(401, "Unauthorized", "unauthorized");
     };
+    if let Some(unverified) = require_verified_user(&user)? {
+        return Ok(unverified);
+    }
 
     let Ok(payload) = serde_json::from_slice::<PatchLinkRequest>(&raw_body) else {
         return problem_response(422, "Unprocessable Entity", "invalid_body");
@@ -623,11 +662,18 @@ pub async fn handle_patch_link(
 }
 
 /// `DELETE /api/links/{code}`
-pub async fn handle_delete_link(req: &Request, db: &D1Database, raw_code: &str) -> Result<Response> {
+pub async fn handle_delete_link(
+    req: &Request,
+    db: &D1Database,
+    raw_code: &str,
+) -> Result<Response> {
     let now = now_sec();
     let Some(user) = authenticate_session(req, db, now).await? else {
         return problem_response(401, "Unauthorized", "unauthorized");
     };
+    if let Some(unverified) = require_verified_user(&user)? {
+        return Ok(unverified);
+    }
 
     let lower_code = raw_code.to_ascii_lowercase();
     let deleted = db
@@ -792,7 +838,10 @@ mod tests {
         // Non-ASCII target URL is percent-encoded into ASCII
         let encoded = validate_target_url("https://example.com/ไทย?q=ลิงก์", origin)
             .expect("Thai URL must be valid");
-        assert!(encoded.is_ascii(), "serialized URL must be ASCII: {encoded}");
+        assert!(
+            encoded.is_ascii(),
+            "serialized URL must be ASCII: {encoded}"
+        );
         assert!(encoded.starts_with("https://example.com/%E0%B9%84"));
 
         // Schemes other than http/https and malformed URLs -> InvalidUrl
@@ -863,8 +912,20 @@ mod tests {
         assert_eq!(validate_alias(&"x".repeat(32)), Ok("x".repeat(32)));
 
         for reserved in [
-            "API", "api", "app", "admin", "Health", "openapi", "login", "logout", "register",
-            "static", "assets",
+            "API",
+            "api",
+            "app",
+            "admin",
+            "Health",
+            "openapi",
+            "login",
+            "logout",
+            "register",
+            "static",
+            "assets",
+            "verify-email",
+            "Reset-Password",
+            "forgot-password",
         ] {
             assert_eq!(
                 validate_alias(reserved),
