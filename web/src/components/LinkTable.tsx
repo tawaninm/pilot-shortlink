@@ -1,10 +1,10 @@
-// LinkTable / LinkRow / Sparkline / CopyButton (DESIGN.md inventory). The code cell is a real <button>
-// that opens the stats row, so keyboard and screen reader users get aria-expanded.
-import { CaretDown, Check, Copy, Trash } from "@phosphor-icons/react";
+// LinkTable / LinkRow / Sparkline / CopyButton / QrButton (DESIGN.md inventory, account-email.md).
+// The code cell is a real <button> that opens the stats row, so keyboard and screen reader users get aria-expanded.
+import { CaretDown, Check, Copy, QrCode, Trash } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { api, call, type LinkSummary, shortUrl } from "../api";
-import { number } from "../messages";
+import { ApiError, api, call, type LinkSummary, shortUrl } from "../api";
+import { number, qrDownloadLabel } from "../messages";
 import { ConfirmDelete } from "./ConfirmDelete";
 import { LinkStats } from "./LinkStats";
 
@@ -14,6 +14,9 @@ export function LinkTable(props: {
   state: TableState;
   items: LinkSummary[];
   freshCode: string | null;
+  unverified?: boolean;
+  unverifiedBannerId?: string;
+  onUnverified: () => void;
   onRetry: () => void;
   onAnnounce: (text: string) => void;
 }) {
@@ -78,6 +81,9 @@ export function LinkTable(props: {
             link={link}
             fresh={link.code === props.freshCode}
             open={open === link.code}
+            unverified={props.unverified}
+            unverifiedBannerId={props.unverifiedBannerId}
+            onUnverified={props.onUnverified}
             onToggle={() => setOpen((c) => (c === link.code ? null : link.code))}
             onClose={() => setOpen(null)}
             onAnnounce={props.onAnnounce}
@@ -92,6 +98,9 @@ function LinkRow(props: {
   link: LinkSummary;
   fresh: boolean;
   open: boolean;
+  unverified?: boolean;
+  unverifiedBannerId?: string;
+  onUnverified: () => void;
   onToggle: () => void;
   onClose: () => void;
   onAnnounce: (text: string) => void;
@@ -114,8 +123,12 @@ function LinkRow(props: {
       setConfirming(false);
       props.onAnnounce(`ลบ /${link.code} แล้ว`);
       await queryClient.invalidateQueries({ queryKey: ["links"] });
-    } catch {
+    } catch (err) {
       setConfirming(false);
+      if (err instanceof ApiError && err.code === "email_unverified") {
+        props.onUnverified();
+        return;
+      }
       setDeleteError("ลบไม่สำเร็จ ลิงก์ยังใช้งานได้ ลองอีกครั้ง");
     }
   }
@@ -123,10 +136,13 @@ function LinkRow(props: {
   const actions = (
     <div className="flex justify-end gap-1">
       <CopyButton code={link.code} buttonRef={copyRef} />
+      <QrButton code={link.code} />
       <button
         type="button"
         className="btn btn-quiet px-0"
         aria-label={`ลบ /${link.code}`}
+        disabled={props.unverified}
+        aria-describedby={props.unverified ? props.unverifiedBannerId : undefined}
         onClick={() => {
           setDeleteError("");
           setConfirming(true);
@@ -219,6 +235,42 @@ export function CopyButton({ code, buttonRef }: { code: string; buttonRef?: Reac
       }}
     >
       {copied ? <Check size={20} aria-hidden="true" /> : <Copy size={20} aria-hidden="true" />}
+    </button>
+  );
+}
+
+function QrButton({ code }: { code: string }) {
+  const [busy, setBusy] = useState(false);
+
+  async function download() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { default: qrcode } = await import("qrcode");
+      const svg = await qrcode.toString(shortUrl(code), { type: "svg", margin: 2 });
+      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${code}.svg`;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="btn btn-quiet px-0"
+      aria-label={qrDownloadLabel(code)}
+      disabled={busy}
+      onClick={download}
+    >
+      <QrCode size={20} aria-hidden="true" />
     </button>
   );
 }

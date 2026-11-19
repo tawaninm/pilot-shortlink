@@ -17,7 +17,13 @@ function readDraft(): { url: string; alias: string } {
   }
 }
 
-export function CreateLinkForm(props: { onCreated: (code: string) => void; onUnauthorized: () => void }) {
+export function CreateLinkForm(props: {
+  onCreated: (code: string) => void;
+  onUnauthorized: () => void;
+  onUnverified: () => void;
+  unverified?: boolean;
+  unverifiedBannerId?: string;
+}) {
   const [draft] = useState(readDraft);
   const [url, setUrl] = useState(draft.url);
   const [alias, setAlias] = useState(draft.alias);
@@ -47,7 +53,7 @@ export function CreateLinkForm(props: { onCreated: (code: string) => void; onUna
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (busy || waitSeconds > 0) return; // no double submit (flows.md N3a)
+    if (busy || waitSeconds > 0 || props.unverified) return; // no double submit (flows.md N3a)
     setBusy(true);
     setError(null);
     try {
@@ -63,6 +69,10 @@ export function CreateLinkForm(props: { onCreated: (code: string) => void; onUna
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         props.onUnauthorized(); // the draft stays in sessionStorage and comes back after login
+        return;
+      }
+      if (err instanceof ApiError && err.code === "email_unverified") {
+        props.onUnverified();
         return;
       }
       const fe = linkError(err, alias.trim());
@@ -133,7 +143,12 @@ export function CreateLinkForm(props: { onCreated: (code: string) => void; onUna
       </div>
 
       <div className="flex flex-col gap-1 sm:pt-7">
-        <button type="submit" className="btn btn-primary w-full sm:w-auto" disabled={busy || waitSeconds > 0}>
+        <button
+          type="submit"
+          className="btn btn-primary w-full sm:w-auto"
+          disabled={busy || waitSeconds > 0 || props.unverified}
+          aria-describedby={props.unverified ? props.unverifiedBannerId : undefined}
+        >
           {busy ? "กำลังย่อ..." : waitSeconds > 0 ? `รอ ${waitSeconds} วินาที` : "ย่อลิงก์"}
         </button>
       </div>

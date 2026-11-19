@@ -1,9 +1,10 @@
-// N1 login and N2 register (docs/design/pages/auth.md, flows.md).
+// N1 login and N2 register (docs/design/pages/auth.md, account-email.md, flows.md).
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useId, useState } from "react";
 import { api, call } from "../api";
-import { authError, type FieldError } from "../messages";
+import { PasswordField } from "../components/PasswordField";
+import { authCopy, authError, type FieldError } from "../messages";
 
 type Mode = "login" | "register";
 
@@ -27,12 +28,11 @@ const copy = {
 } as const;
 
 export function AuthPage({ mode }: { mode: Mode }) {
-  const search = useSearch({ strict: false }) as { email?: string; expired?: boolean };
+  const search = useSearch({ strict: false }) as { email?: string; expired?: boolean; reset?: boolean };
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [email, setEmail] = useState(search.email ?? "");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<FieldError | null>(null);
   const id = useId();
@@ -68,8 +68,16 @@ export function AuthPage({ mode }: { mode: Mode }) {
       <h1 className="mt-1 text-xl font-semibold">{t.title}</h1>
 
       {search.expired && mode === "login" && (
-        <p className="mt-4 rounded-control border border-line-strong p-3 text-sm">
-          หมดเวลาเข้าสู่ระบบ เข้าสู่ระบบอีกครั้งเพื่อทำต่อ
+        <p className="mt-4 rounded-control border border-line-strong p-3 text-sm">{authCopy.expired}</p>
+      )}
+
+      {search.reset && mode === "login" && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="mt-4 rounded-control border border-line-strong p-3 text-sm"
+        >
+          {authCopy.resetSuccess}
         </p>
       )}
 
@@ -91,7 +99,11 @@ export function AuthPage({ mode }: { mode: Mode }) {
             <p id={`${id}-email-err`} className="text-sm text-error">
               {emailErr.text}{" "}
               {mode === "register" && emailErr.text.includes("มีบัญชีแล้ว") && (
-                <Link to="/login" search={{ email }} className="underline">
+                <Link
+                  to="/login"
+                  search={{ email, expired: undefined, reset: undefined }}
+                  className="underline"
+                >
                   เข้าสู่ระบบ
                 </Link>
               )}
@@ -99,34 +111,28 @@ export function AuthPage({ mode }: { mode: Mode }) {
           )}
         </div>
 
-        <div className="flex flex-col gap-1">
-          <label htmlFor={`${id}-password`}>รหัสผ่าน</label>
-          <div className="flex gap-2">
-            <input
-              id={`${id}-password`}
-              className="control min-w-0 flex-1"
-              type={showPassword ? "text" : "password"}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              required
-              minLength={mode === "register" ? 10 : undefined}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              aria-invalid={passErr ? true : undefined}
-              aria-describedby={`${id}-pass-hint`}
-            />
-            <button
-              type="button"
-              className="btn btn-quiet"
-              aria-pressed={showPassword}
-              onClick={() => setShowPassword((v) => !v)}
+        <PasswordField
+          id={`${id}-password`}
+          label="รหัสผ่าน"
+          autoComplete={mode === "login" ? "current-password" : "new-password"}
+          minLength={mode === "register" ? 10 : undefined}
+          value={password}
+          onChange={setPassword}
+          error={passErr?.text}
+          hint={mode === "register" ? authCopy.passwordHint : undefined}
+        />
+
+        {mode === "login" && (
+          <p className="-mt-2 text-sm">
+            <Link
+              to="/forgot-password"
+              search={{ email: email.trim() || undefined }}
+              className="text-brand underline"
             >
-              {showPassword ? "ซ่อนรหัส" : "แสดงรหัส"}
-            </button>
-          </div>
-          <p id={`${id}-pass-hint`} className={`text-sm ${passErr ? "text-error" : "text-muted"}`}>
-            {passErr ? passErr.text : mode === "register" ? "อย่างน้อย 10 ตัว" : ""}
+              {authCopy.forgotPasswordLink}
+            </Link>
           </p>
-        </div>
+        )}
 
         <p role="alert" className="text-sm text-error">
           {formErr?.text}
@@ -139,7 +145,11 @@ export function AuthPage({ mode }: { mode: Mode }) {
 
       <p className="mt-4 text-sm">
         {t.switchText}{" "}
-        <Link to={t.switchTo} search={{ email: email || undefined }} className="text-brand underline">
+        <Link
+          to={t.switchTo}
+          search={{ email: email || undefined, expired: undefined, reset: undefined }}
+          className="text-brand underline"
+        >
           {t.switchLabel}
         </Link>
       </p>
