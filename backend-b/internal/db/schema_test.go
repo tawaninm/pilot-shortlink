@@ -16,11 +16,11 @@ func TestSchema(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.New(t)
 
-	t.Run("all five tables exist", func(t *testing.T) {
+	t.Run("all tables exist", func(t *testing.T) {
 		var n int
 		err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-			WHERE table_schema = 'public' AND table_name IN ('users','sessions','links','click_daily','rate_limits')`).Scan(&n)
-		if err != nil || n != 5 {
+			WHERE table_schema = 'public' AND table_name IN ('users','sessions','links','click_daily','rate_limits','email_tokens','oauth_accounts','oauth_states')`).Scan(&n)
+		if err != nil || n != 8 {
 			t.Fatalf("tables: got %d, err %v", n, err)
 		}
 	})
@@ -118,9 +118,106 @@ func TestSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("oauth_accounts enforces provider check, PK and cascades on user delete", func(t *testing.T) {
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'oauth_accounts'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, c)
+		}
+		for _, want := range []string{"provider", "subject", "user_id", "created_at"} {
+			if !slices.Contains(got, want) {
+				t.Fatalf("oauth_accounts missing column %q (got %v)", want, got)
+			}
+		}
+		if len(got) != 4 {
+			t.Fatalf("oauth_accounts columns = %v, want 4", got)
+		}
+
+		var uid int64
+		mustScan(t, pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('oa@example.test','!oauth') RETURNING id`), &uid)
+		if _, err := pool.Exec(ctx, `INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ('google', 'sub-1', $1)`, uid); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ('google', 'sub-1', $1)`, uid); err == nil {
+			t.Fatal("duplicate (provider, subject) was accepted")
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ('twitter', 'sub-2', $1)`, uid); err == nil {
+			t.Fatal("invalid oauth provider was accepted")
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, uid); err != nil {
+			t.Fatal(err)
+		}
+		var left int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM oauth_accounts WHERE user_id = $1`, uid), &left)
+		if left != 0 {
+			t.Fatalf("oauth_accounts left after user delete cascade: %d", left)
+		}
+	})
+
+	t.Run("oauth_states stores state_hash without plain state column", func(t *testing.T) {
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'oauth_states'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, c)
+			if strings.ToLower(c) == "state" {
+				t.Fatalf("oauth_states must not have plain state column %q", c)
+			}
+		}
+		for _, want := range []string{"state_hash", "provider", "verifier", "expires_at"} {
+			if !slices.Contains(got, want) {
+				t.Fatalf("oauth_states missing column %q (got %v)", want, got)
+			}
+		}
+		if len(got) != 4 {
+			t.Fatalf("oauth_states columns = %v, want 4", got)
+		}
+
+		if _, err := pool.Exec(ctx, `INSERT INTO oauth_states (state_hash, provider, verifier, expires_at) VALUES ('h1', 'google', 'v1', now() + interval '10 minutes')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO oauth_states (state_hash, provider, verifier, expires_at) VALUES ('h1', 'google', 'v2', now() + interval '10 minutes')`); err == nil {
+			t.Fatal("duplicate state_hash was accepted")
+		}
+		var idxCount int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'oauth_states' AND indexname = 'oauth_states_expires_idx'`), &idxCount)
+		if idxCount != 1 {
+			t.Fatalf("oauth_states_expires_idx count = %d, want 1", idxCount)
+		}
+	})
+
 	t.Run("down then up works (level 2: every migration has a down)", func(t *testing.T) {
+		// Roll back 00003 (oauth) then 00002 (email_tokens), verify tables drop cleanly, then migrate back up.
 		if err := db.Migrate(ctx, pool, "down"); err != nil {
-			t.Fatalf("down: %v", err)
+			t.Fatalf("down 00003: %v", err)
+		}
+		var oauthTables int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('oauth_accounts','oauth_states')`), &oauthTables)
+		if oauthTables != 0 {
+			t.Fatalf("00003 down left %d oauth tables", oauthTables)
+		}
+		var idxCount int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'oauth_states_expires_idx'`), &idxCount)
+		if idxCount != 0 {
+			t.Fatalf("00003 down left oauth_states_expires_idx")
+		}
+		if err := db.Migrate(ctx, pool, "down"); err != nil {
+			t.Fatalf("down 00002: %v", err)
 		}
 		var uid int64
 		mustScan(t, pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('legacy@example.test','x') RETURNING id`), &uid)
@@ -131,6 +228,14 @@ func TestSchema(t *testing.T) {
 		mustScan(t, pool.QueryRow(ctx, `SELECT email_verified_at = created_at FROM users WHERE id = $1`, uid), &verified)
 		if !verified {
 			t.Fatal("existing user was not marked verified by 00002 migration")
+		}
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('oauth_accounts','oauth_states')`), &oauthTables)
+		if oauthTables != 2 {
+			t.Fatalf("up again: got %d oauth tables, want 2", oauthTables)
+		}
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'oauth_states' AND indexname = 'oauth_states_expires_idx'`), &idxCount)
+		if idxCount != 1 {
+			t.Fatalf("up again: oauth_states_expires_idx count = %d, want 1", idxCount)
 		}
 	})
 }

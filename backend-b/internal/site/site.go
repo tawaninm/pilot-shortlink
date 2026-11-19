@@ -13,10 +13,10 @@ import (
 //go:embed all:dist
 var files embed.FS
 
-// CSP for the app shell: own scripts only, Google Fonts for type (DESIGN.md), no framing (OWASP A02).
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; " +
+// CSP for the app shell: own scripts plus Cloudflare Turnstile, Google Fonts for type (DESIGN.md), no framing (OWASP A02).
+const CSP = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' https://fonts.googleapis.com; " +
 	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; " +
-	"frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	"frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 
 // HTMLHeaders sets the headers every HTML page gets.
 func HTMLHeaders(h http.Header) {

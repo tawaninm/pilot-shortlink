@@ -15,6 +15,7 @@ import (
 
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/api"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/auth"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/captcha"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/testdb"
 )
@@ -112,9 +113,10 @@ func TestEmailTokensAndLogging(t *testing.T) {
 			Now:       func() time.Time { return now },
 			Mailer:    c,
 			Capture:   c,
+			Captcha:   captcha.Fake{},
 		})
 
-		rec := postJSON(t, h, "/api/auth/register", `{"email":"exp@example.test","password":"correct-horse-battery"}`)
+		rec := postJSON(t, h, "/api/auth/register", `{"email":"exp@example.test","password":"correct-horse-battery","captcha":"fake-pass"}`)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
 		}
@@ -127,7 +129,7 @@ func TestEmailTokensAndLogging(t *testing.T) {
 			t.Fatalf("expired verify token: %d %s", vRec.Code, vRec.Body.String())
 		}
 
-		fRec := postJSON(t, h, "/api/auth/password/forgot", `{"email":"exp@example.test"}`)
+		fRec := postJSON(t, h, "/api/auth/password/forgot", `{"email":"exp@example.test","captcha":"fake-pass"}`)
 		if fRec.Code != http.StatusNoContent {
 			t.Fatalf("forgot: %d", fRec.Code)
 		}
@@ -160,13 +162,14 @@ func TestEmailTokensAndLogging(t *testing.T) {
 				AppOrigin: testOrigin,
 				Log:       slog.New(slog.NewJSONHandler(&logs, nil)),
 				Mailer:    rm,
+				Captcha:   captcha.Fake{},
 			})
 
 			email := "fail" + time.Now().Format("150405.000") + "@example.test"
 			if status == http.StatusTooManyRequests {
 				email = "fail429@example.test"
 			}
-			rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery"}`)
+			rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery","captcha":"fake-pass"}`)
 			if rec.Code != http.StatusCreated {
 				resendSrv.Close()
 				t.Fatalf("register with Resend %d returned %d: %s", status, rec.Code, rec.Body.String())
@@ -214,10 +217,11 @@ func TestEmailTokensAndLogging(t *testing.T) {
 			Log:       slog.New(slog.NewJSONHandler(&logs, nil)),
 			Mailer:    c,
 			Capture:   c,
+			Captcha:   captcha.Fake{},
 		})
 
 		email := "nolog@example.test"
-		rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery"}`)
+		rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery","captcha":"fake-pass"}`)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("register: %d", rec.Code)
 		}
@@ -257,10 +261,11 @@ func TestEmailTokensAndLogging(t *testing.T) {
 			Log:       slog.New(slog.NewJSONHandler(&syncBuffer{}, nil)),
 			Mailer:    c,
 			Capture:   c,
+			Captcha:   captcha.Fake{},
 		})
 
 		email := "acv9-register@example.test"
-		rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery"}`)
+		rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery","captcha":"fake-pass"}`)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
 		}

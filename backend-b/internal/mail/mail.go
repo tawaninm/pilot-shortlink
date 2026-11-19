@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -102,6 +103,25 @@ type Resend struct {
 	From   string
 	URL    string
 	Client *http.Client
+}
+
+// LogValue redacts APIKey if Resend is ever passed to slog.
+func (r Resend) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("api_key", "[redacted]"),
+		slog.String("from", r.From),
+		slog.String("url", r.URL),
+	)
+}
+
+// String redacts APIKey when formatted via %v / %+v.
+func (r Resend) String() string {
+	return fmt.Sprintf("mail.Resend{APIKey:%q From:%q URL:%q}", "[redacted]", r.From, r.URL)
+}
+
+// GoString redacts APIKey when formatted via %#v.
+func (r Resend) GoString() string {
+	return fmt.Sprintf("mail.Resend{APIKey:%q, From:%q, URL:%q}", "[redacted]", r.From, r.URL)
 }
 
 // NewResend configures a Resend adapter with a 10 s timeout and the default sender fallback.

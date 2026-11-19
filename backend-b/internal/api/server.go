@@ -9,19 +9,25 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/captcha"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/oauth"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/site"
 )
 
 // Config is everything the HTTP layer needs from the outside.
 type Config struct {
-	Pool      *pgxpool.Pool
-	AppOrigin string // e.g. https://pilot-shortlink-b.onrender.com, used for the Origin check and self_link
-	Log       *slog.Logger
-	Now       func() time.Time // injectable clock for tests; nil means time.Now
-	Mailer    mail.Mailer      // outbound email port
-	Capture   *mail.Capture    // non-nil only when MAIL_MODE == "capture"; registers GET /api/test/mail
+	Pool             *pgxpool.Pool
+	AppOrigin        string // e.g. https://pilot-shortlink-b.onrender.com, used for the Origin check and self_link
+	Log              *slog.Logger
+	Now              func() time.Time // injectable clock for tests; nil means time.Now
+	Mailer           mail.Mailer      // outbound email port
+	Capture          *mail.Capture    // non-nil only when MAIL_MODE == "capture"; registers GET /api/test/mail
+	OAuth            *oauth.Providers // configured Google/GitHub providers
+	Captcha          captcha.Verifier // Turnstile verifier; nil fails closed
+	TurnstileSiteKey *string          // public Turnstile site key for GET /api/config; nil in fake mode
+	TrustedProxyHops int              // number of trusted proxies appending to X-Forwarded-For; <= 0 ignores XFF
 }
 
 type server struct {
@@ -45,6 +51,9 @@ func NewHandler(cfg Config) http.Handler {
 	if cfg.Mailer == nil && cfg.Capture != nil {
 		cfg.Mailer = cfg.Capture
 	}
+	if cfg.Captcha == nil {
+		cfg.Captcha = captcha.NewCloudflare("")
+	}
 	s := &server{Config: cfg, q: gen.New(cfg.Pool)}
 	r := chi.NewRouter()
 	r.Use(s.logRequests, s.recoverPanics, noSniff)
@@ -66,12 +75,15 @@ func NewHandler(cfg Config) http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(s.requireOrigin)
+		r.Get("/config", s.config)
 		r.Post("/auth/register", s.register)
 		r.Post("/auth/login", s.login)
 		r.Post("/auth/logout", s.logout)
 		r.Post("/auth/verify-email", s.verifyEmail)
 		r.Post("/auth/password/forgot", s.forgotPassword)
 		r.Post("/auth/password/reset", s.resetPassword)
+		r.Get("/auth/oauth/{provider}/start", s.oauthStart)
+		r.Get("/auth/oauth/{provider}/callback", s.oauthCallback)
 		if s.Capture != nil {
 			r.Get("/test/mail", s.testMail)
 		}

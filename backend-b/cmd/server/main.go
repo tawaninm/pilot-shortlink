@@ -8,12 +8,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/api"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/captcha"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/oauth"
 )
 
 func main() {
@@ -24,14 +28,38 @@ func main() {
 	}
 }
 
+func checkRenderGuards() error {
+	if os.Getenv("RENDER") == "" {
+		return nil
+	}
+	// Test-only modes expose tokens or bypass external checks; Render always sets RENDER, so refuse them there (I6).
+	if os.Getenv("MAIL_MODE") == "capture" {
+		return errors.New("MAIL_MODE=capture is not allowed on Render")
+	}
+	if os.Getenv("OAUTH_MODE") == "fake" {
+		return errors.New("OAUTH_MODE=fake is not allowed on Render")
+	}
+	if os.Getenv("TURNSTILE_MODE") == "fake" {
+		return errors.New("TURNSTILE_MODE=fake is not allowed on Render")
+	}
+	return nil
+}
+
+func parseTrustedProxyHops(raw string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func run(log *slog.Logger) error {
 	dbURL, origin := os.Getenv("DATABASE_URL"), os.Getenv("APP_ORIGIN")
 	if dbURL == "" || origin == "" {
 		return errors.New("DATABASE_URL and APP_ORIGIN are required")
 	}
-	// capture mode exposes every mailed token at GET /api/test/mail; Render always sets RENDER, so refuse it there.
-	if os.Getenv("MAIL_MODE") == "capture" && os.Getenv("RENDER") != "" {
-		return errors.New("MAIL_MODE=capture is not allowed on Render")
+	if err := checkRenderGuards(); err != nil {
+		return err
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -48,9 +76,22 @@ func run(log *slog.Logger) error {
 	defer pool.Close()
 
 	mailer, capture := mail.FromEnv()
+	oauthProviders := oauth.FromEnv(origin)
+	captchaVerifier, turnstileSiteKey := captcha.FromEnv(origin)
+	trustedProxyHops := parseTrustedProxyHops(os.Getenv("TRUSTED_PROXY_HOPS"))
 	srv := &http.Server{
-		Addr:              ":" + port,
-		Handler:           api.NewHandler(api.Config{Pool: pool, AppOrigin: origin, Log: log, Mailer: mailer, Capture: capture}),
+		Addr: ":" + port,
+		Handler: api.NewHandler(api.Config{
+			Pool:             pool,
+			AppOrigin:        origin,
+			Log:              log,
+			Mailer:           mailer,
+			Capture:          capture,
+			OAuth:            oauthProviders,
+			Captcha:          captchaVerifier,
+			TurnstileSiteKey: turnstileSiteKey,
+			TrustedProxyHops: trustedProxyHops,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,

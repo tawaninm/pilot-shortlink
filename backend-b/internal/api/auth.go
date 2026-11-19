@@ -163,16 +163,36 @@ func (s *server) hashTimed(op string, fn func()) {
 	s.Log.Info("argon2", "op", op, "ms", time.Since(start).Milliseconds())
 }
 
+type registerBody struct {
+	Email    *string `json:"email"`
+	Password *string `json:"password"`
+	Captcha  *string `json:"captcha"`
+}
+
+func (s *server) verifyCaptcha(r *http.Request, token *string) bool {
+	if token == nil || *token == "" || s.Captcha == nil || !s.Captcha.Verify(r.Context(), *token, s.clientIP(r)) {
+		s.Log.Info("captcha_failed") // never log the token, IP, or email (I7)
+		return false
+	}
+	return true
+}
+
 func (s *server) register(w http.ResponseWriter, r *http.Request) {
-	var c credentials
-	if readJSON(w, r, &c) != nil {
+	var body registerBody
+	if readJSON(w, r, &body) != nil || body.Email == nil || body.Password == nil {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
 		return
 	}
-	email, password, ok := c.parse(w)
-	if !ok {
+	if !s.verifyCaptcha(r, body.Captcha) {
+		writeProblem(w, http.StatusForbidden, "captcha_failed", "")
 		return
 	}
+	email, ok := parseEmail(*body.Email)
+	if !ok {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "email")
+		return
+	}
+	password := *body.Password
 	if n := utf8.RuneCountInString(password); n < 10 || n > 128 {
 		writeProblem(w, http.StatusUnprocessableEntity, "weak_password", "password")
 		return
@@ -239,11 +259,15 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	default:
-		s.hashTimed("login", func() { match, err = auth.VerifyPassword(password, user.PasswordHash) })
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
+		s.hashTimed("login", func() {
+			match, err = auth.VerifyPassword(password, user.PasswordHash)
+			if err != nil {
+				// Non-PHC hash (e.g. "!oauth" on OAuth-only accounts): burn equal Argon2 time and fail with 401 (I8, AC-O8).
+				auth.BurnTime(password)
+				match = false
+				err = nil
+			}
+		})
 	}
 	if !match {
 		s.Log.Info("login_failed") // no email: logs must not identify people
@@ -354,13 +378,19 @@ func (s *server) resendVerifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 type forgotBody struct {
-	Email *string `json:"email"`
+	Email   *string `json:"email"`
+	Captcha *string `json:"captcha"`
 }
 
 func (s *server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	var body forgotBody
 	if readJSON(w, r, &body) != nil || body.Email == nil {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
+		return
+	}
+	// Check captcha BEFORE email format and BEFORE per-email rate limit so bad captchas cannot burn the owner's quota (I9, AC-T4).
+	if !s.verifyCaptcha(r, body.Captcha) {
+		writeProblem(w, http.StatusForbidden, "captcha_failed", "")
 		return
 	}
 	email, ok := parseEmail(*body.Email)
