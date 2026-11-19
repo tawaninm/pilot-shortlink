@@ -212,6 +212,17 @@ E2E_URL="$APP_URL" pnpm -F e2e test
 
 ---
 
+## 3.5 รอบ pilot-addons (ยืนยันอีเมล, รีเซ็ตรหัสผ่าน, QR) deploy 2026-11-19
+
+ลำดับที่ใช้จริง (migration ทั้งสองฝั่งเพิ่มคอลัมน์และตารางเท่านั้น โค้ดเก่ารันกับ schema ใหม่ได้ แต่โค้ดใหม่ต้องมี schema ใหม่ก่อน จึง migrate ก่อน deploy เสมอ):
+1. Secret: `RESEND_API_KEY` ตั้งเองโดยตะวัน (`npx --yes wrangler@4.163.0 secret put RESEND_API_KEY --env production` ใน `backend-a` และตัวแปรใน Render Dashboard) `MAIL_FROM` ไม่ต้องตั้ง (ใช้ `onboarding@resend.dev` ส่งได้เฉพาะอีเมลเจ้าของบัญชี Resend) ห้ามตั้ง `MAIL_MODE` บน production
+2. A: `npx --yes wrangler@4.163.0 d1 migrations apply DB --env production --remote` (0002_email_tokens.sql) แล้ว `pnpm -F web build` และ `wrangler deploy --env production`
+3. B: ตะวันรัน `go run ./cmd/migrate up` ใน `backend-b` ด้วย Neon Direct URL (ใส่ผ่าน `Read-Host` แล้ว `Remove-Item Env:\DATABASE_URL`) ต้องเห็น `applied 00002_email_tokens.sql` แล้วจึง `git push origin main` ให้ Render deploy
+4. Smoke ทั้งสอง URL: `/api/test/mail?to=x@example.com` ได้ 404 (AC-V8), `/verify-email` `/forgot-password` `/reset-password` ได้ 200, register ได้ `emailVerified:false`, `POST /api/links` ได้ 403 `email_unverified`, forgot ได้ 204 ใช้อีเมลทดสอบ `delivered+<label>@resend.dev` ไม่ใช้อีเมลคนจริง ดูว่าส่งเมลจริงได้ด้วย `wrangler tail --env production` ต้องเห็น `"event":"mail_send","result":"ok"`
+5. ตะวันทดสอบเอง: สมัครด้วยอีเมลเจ้าของบัญชี Resend กดลิงก์ยืนยัน, ลืมรหัสผ่านแล้วตั้งใหม่ (AC-V12), สแกน QR ด้วยมือถือ
+
+หมายเหตุ: `curl -I` (HEAD) ที่ `/` ของ B ได้ 405 มาตั้งแต่ก่อนรอบนี้ ตรวจ header ด้วย GET (`curl -s -D - -o /dev/null <URL>/`)
+
 ## 4. การเฝ้าดูตาม ADR-002 (Error 1102 บน `/api/auth/*` ของ Backend A)
 
 ตาม `docs/architecture.md` (ADR-002) Backend A ใช้ Argon2id (`m=19456 KiB, t=2, p=1` ตามเกณฑ์ OWASP) บน Cloudflare Workers Free ซึ่งกำหนดเพดาน CPU ไว้ที่ 10 ms ต่อคำขอ (ผลวัดจริงใน `spikes/RESULTS.md` ใช้ CPU ราว 54 ms median เฉพาะตอนสมัครและเข้าสู่ระบบ)
