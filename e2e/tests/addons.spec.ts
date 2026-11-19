@@ -2,10 +2,18 @@
 // texts from docs/design/pages/account-email.md). Needs MAIL_MODE=capture.
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
-import { expect, test } from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
 import { PASSWORD, createLink, mailLink, register, registerUnverified } from "./helpers";
 
 const require = createRequire(import.meta.url);
+
+
+// Below 640px the row actions sit inside the expanded stats row (docs/design/pages/links.md), same as app.spec.ts
+async function openRowActions(page: Page, code: string) {
+  if (await page.getByRole("button", { name: `ดาวน์โหลด QR ของ /${code}` }).isHidden()) {
+    await page.locator(`button[aria-controls="stats-${code}"]`).click();
+  }
+}
 
 test("AC-V11: unverified users see the banner and cannot create links until they verify", async ({ page }) => {
   const email = await registerUnverified(page);
@@ -62,7 +70,7 @@ test("AC-R web: forgot password from the login page, set a new password, log in 
   await page.getByLabel("email").fill(email);
   await page.getByLabel("รหัสผ่าน", { exact: true }).fill("a-brand-new-passphrase");
   await page.getByRole("button", { name: "เข้าสู่ระบบ" }).click();
-  await expect(page.getByRole("heading", { name: /ลิงก์ของฉัน/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /ลิงก์ของฉัน \(\d+\)/ })).toBeVisible(); // the h2 with the count, not the sr-only h1
 });
 
 test("AC-R web: a used reset link shows the error and a way to ask again", async ({ page }) => {
@@ -85,6 +93,7 @@ test("AC-R web: a used reset link shows the error and a way to ask again", async
 test("AC-Q1: the QR download is <code>.svg and decodes to the short URL", async ({ page }) => {
   await register(page);
   const code = await createLink(page, "https://example.com/qr", `qr-${Date.now().toString(36)}`);
+  await openRowActions(page, code);
   const [download] = await Promise.all([
     page.waitForEvent("download"),
     page.getByRole("button", { name: `ดาวน์โหลด QR ของ /${code}` }).click(),
@@ -93,9 +102,11 @@ test("AC-Q1: the QR download is <code>.svg and decodes to the short URL", async 
   const svg = await readFile(await download.path(), "utf8");
   expect(svg).toContain("<svg");
 
-  // Decode for real: draw the SVG on a canvas in the browser and read it with jsQR
-  await page.addScriptTag({ path: require.resolve("jsqr/dist/jsQR.js") });
-  const decoded = await page.evaluate(async (markup) => {
+  // Decode for real: draw the SVG on a canvas and read it with jsQR. This runs in a separate about:blank tab
+  // because the app's CSP (script-src 'self') rightly blocks the injected jsQR script on the app origin.
+  const scratch = await page.context().newPage();
+  await scratch.addScriptTag({ path: require.resolve("jsqr/dist/jsQR.js") });
+  const decoded = await scratch.evaluate(async (markup) => {
     const img = new Image();
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
     await img.decode();
@@ -109,12 +120,14 @@ test("AC-Q1: the QR download is <code>.svg and decodes to the short URL", async 
     // @ts-expect-error jsQR is the global from the UMD bundle added above
     return jsQR(data, 400, 400)?.data ?? null;
   }, svg);
+  await scratch.close();
   expect(decoded).toBe(`${new URL(page.url()).origin}/${code}`);
 });
 
 test("AC-Q2: the QR button is reachable by keyboard and has an accessible name", async ({ page }) => {
   await register(page);
   const code = await createLink(page, "https://example.com/qr-key", `qk-${Date.now().toString(36)}`);
+  await openRowActions(page, code);
   const button = page.getByRole("button", { name: `ดาวน์โหลด QR ของ /${code}` });
   await button.focus();
   await expect(button).toBeFocused();
