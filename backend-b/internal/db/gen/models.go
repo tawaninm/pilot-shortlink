@@ -33,6 +33,20 @@ type Link struct {
 	CreatedAt time.Time
 }
 
+type OauthAccount struct {
+	Provider  string
+	Subject   string
+	UserID    int64
+	CreatedAt time.Time
+}
+
+type OauthState struct {
+	StateHash string
+	Provider  string
+	Verifier  string
+	ExpiresAt time.Time
+}
+
 type RateLimit struct {
 	Key         string
 	WindowStart time.Time

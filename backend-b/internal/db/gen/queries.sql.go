@@ -31,6 +31,22 @@ func (q *Queries) BumpRate(ctx context.Context, arg BumpRateParams) (int32, erro
 	return count, err
 }
 
+const claimUnverifiedUser = `-- name: ClaimUnverifiedUser :exec
+UPDATE users SET password_hash = $2, email_verified_at = $3 WHERE id = $1 AND email_verified_at IS NULL
+`
+
+type ClaimUnverifiedUserParams struct {
+	ID              int64
+	PasswordHash    string
+	EmailVerifiedAt pgtype.Timestamptz
+}
+
+// Pre-hijack defense (I10, AC-O12): linking OAuth to an unverified account wipes its password and marks it verified.
+func (q *Queries) ClaimUnverifiedUser(ctx context.Context, arg ClaimUnverifiedUserParams) error {
+	_, err := q.db.Exec(ctx, claimUnverifiedUser, arg.ID, arg.PasswordHash, arg.EmailVerifiedAt)
+	return err
+}
+
 const consumeEmailToken = `-- name: ConsumeEmailToken :one
 UPDATE email_tokens SET used_at = $3 WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > $3 RETURNING user_id
 `
@@ -47,6 +63,24 @@ func (q *Queries) ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenPa
 	var user_id int64
 	err := row.Scan(&user_id)
 	return user_id, err
+}
+
+const consumeOAuthState = `-- name: ConsumeOAuthState :one
+DELETE FROM oauth_states WHERE state_hash = $1 AND provider = $2 AND expires_at > $3 RETURNING verifier
+`
+
+type ConsumeOAuthStateParams struct {
+	StateHash string
+	Provider  string
+	ExpiresAt time.Time
+}
+
+// Atomic single-statement consume: concurrent callbacks with the same state cannot both succeed (I3).
+func (q *Queries) ConsumeOAuthState(ctx context.Context, arg ConsumeOAuthStateParams) (string, error) {
+	row := q.db.QueryRow(ctx, consumeOAuthState, arg.StateHash, arg.Provider, arg.ExpiresAt)
+	var verifier string
+	err := row.Scan(&verifier)
+	return verifier, err
 }
 
 const countClick = `-- name: CountClick :exec
@@ -117,6 +151,27 @@ func (q *Queries) CreateLink(ctx context.Context, arg CreateLinkParams) (CreateL
 	return i, err
 }
 
+const createOAuthState = `-- name: CreateOAuthState :exec
+INSERT INTO oauth_states (state_hash, provider, verifier, expires_at) VALUES ($1, $2, $3, $4)
+`
+
+type CreateOAuthStateParams struct {
+	StateHash string
+	Provider  string
+	Verifier  string
+	ExpiresAt time.Time
+}
+
+func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) error {
+	_, err := q.db.Exec(ctx, createOAuthState,
+		arg.StateHash,
+		arg.Provider,
+		arg.Verifier,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
 const createSession = `-- name: CreateSession :exec
 INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)
 `
@@ -145,6 +200,26 @@ type CreateUserParams struct {
 // Queries for sqlc. Every query on links filters by user_id on the server (docs/architecture.md section 6).
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (int64, error) {
 	row := q.db.QueryRow(ctx, createUser, arg.Email, arg.PasswordHash)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const createVerifiedOAuthUserIfAbsent = `-- name: CreateVerifiedOAuthUserIfAbsent :one
+INSERT INTO users (email, password_hash, email_verified_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (email) DO NOTHING
+RETURNING id
+`
+
+type CreateVerifiedOAuthUserIfAbsentParams struct {
+	Email           string
+	PasswordHash    string
+	EmailVerifiedAt pgtype.Timestamptz
+}
+
+func (q *Queries) CreateVerifiedOAuthUserIfAbsent(ctx context.Context, arg CreateVerifiedOAuthUserIfAbsentParams) (int64, error) {
+	row := q.db.QueryRow(ctx, createVerifiedOAuthUserIfAbsent, arg.Email, arg.PasswordHash, arg.EmailVerifiedAt)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
@@ -186,6 +261,24 @@ func (q *Queries) DailyClicksForUser(ctx context.Context, arg DailyClicksForUser
 		return nil, err
 	}
 	return items, nil
+}
+
+const deleteAllUnusedEmailTokens = `-- name: DeleteAllUnusedEmailTokens :exec
+DELETE FROM email_tokens WHERE user_id = $1 AND used_at IS NULL
+`
+
+func (q *Queries) DeleteAllUnusedEmailTokens(ctx context.Context, userID int64) error {
+	_, err := q.db.Exec(ctx, deleteAllUnusedEmailTokens, userID)
+	return err
+}
+
+const deleteExpiredOAuthStates = `-- name: DeleteExpiredOAuthStates :exec
+DELETE FROM oauth_states WHERE expires_at <= $1
+`
+
+func (q *Queries) DeleteExpiredOAuthStates(ctx context.Context, expiresAt time.Time) error {
+	_, err := q.db.Exec(ctx, deleteExpiredOAuthStates, expiresAt)
+	return err
 }
 
 const deleteOldRates = `-- name: DeleteOldRates :exec
@@ -260,6 +353,22 @@ func (q *Queries) GetLinkTarget(ctx context.Context, code string) (GetLinkTarget
 	var i GetLinkTargetRow
 	err := row.Scan(&i.ID, &i.Url)
 	return i, err
+}
+
+const getOAuthAccountUserID = `-- name: GetOAuthAccountUserID :one
+SELECT user_id FROM oauth_accounts WHERE provider = $1 AND subject = $2
+`
+
+type GetOAuthAccountUserIDParams struct {
+	Provider string
+	Subject  string
+}
+
+func (q *Queries) GetOAuthAccountUserID(ctx context.Context, arg GetOAuthAccountUserIDParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getOAuthAccountUserID, arg.Provider, arg.Subject)
+	var user_id int64
+	err := row.Scan(&user_id)
+	return user_id, err
 }
 
 const getOwnLink = `-- name: GetOwnLink :one
@@ -340,6 +449,39 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 	var i GetUserByEmailRow
 	err := row.Scan(&i.ID, &i.PasswordHash, &i.EmailVerified)
 	return i, err
+}
+
+const getUserByEmailForUpdate = `-- name: GetUserByEmailForUpdate :one
+SELECT id, (email_verified_at IS NOT NULL)::boolean AS email_verified
+FROM users WHERE email = $1 FOR UPDATE
+`
+
+type GetUserByEmailForUpdateRow struct {
+	ID            int64
+	EmailVerified bool
+}
+
+func (q *Queries) GetUserByEmailForUpdate(ctx context.Context, email string) (GetUserByEmailForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, getUserByEmailForUpdate, email)
+	var i GetUserByEmailForUpdateRow
+	err := row.Scan(&i.ID, &i.EmailVerified)
+	return i, err
+}
+
+const insertOAuthAccount = `-- name: InsertOAuthAccount :exec
+INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ($1, $2, $3)
+ON CONFLICT (provider, subject) DO NOTHING
+`
+
+type InsertOAuthAccountParams struct {
+	Provider string
+	Subject  string
+	UserID   int64
+}
+
+func (q *Queries) InsertOAuthAccount(ctx context.Context, arg InsertOAuthAccountParams) error {
+	_, err := q.db.Exec(ctx, insertOAuthAccount, arg.Provider, arg.Subject, arg.UserID)
+	return err
 }
 
 const linkDaily = `-- name: LinkDaily :many

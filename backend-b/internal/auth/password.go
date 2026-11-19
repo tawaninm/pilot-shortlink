@@ -14,6 +14,11 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// OAuthOnlyPasswordHash is stored in users.password_hash for accounts created via OAuth
+// (or claimed from an unverified password account). It is not a valid Argon2id PHC string,
+// so VerifyPassword always rejects it (I8, AC-O8).
+const OAuthOnlyPasswordHash = "!oauth"
+
 // OWASP minimum for Argon2id: m=19 MiB, t=2, p=1 (docs/architecture.md ADR-002).
 const (
 	memoryKiB = 19456

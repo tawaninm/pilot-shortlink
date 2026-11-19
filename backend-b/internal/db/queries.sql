@@ -98,3 +98,37 @@ ON CONFLICT (link_id, day, referrer_host) DO UPDATE SET clicks = click_daily.cli
 -- name: ResetRate :exec
 -- A successful login clears the failure count for that email (the limit counts guesses, not users).
 DELETE FROM rate_limits WHERE key = $1;
+
+-- name: DeleteExpiredOAuthStates :exec
+DELETE FROM oauth_states WHERE expires_at <= $1;
+
+-- name: CreateOAuthState :exec
+INSERT INTO oauth_states (state_hash, provider, verifier, expires_at) VALUES ($1, $2, $3, $4);
+
+-- name: ConsumeOAuthState :one
+-- Atomic single-statement consume: concurrent callbacks with the same state cannot both succeed (I3).
+DELETE FROM oauth_states WHERE state_hash = $1 AND provider = $2 AND expires_at > $3 RETURNING verifier;
+
+-- name: GetOAuthAccountUserID :one
+SELECT user_id FROM oauth_accounts WHERE provider = $1 AND subject = $2;
+
+-- name: InsertOAuthAccount :exec
+INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ($1, $2, $3)
+ON CONFLICT (provider, subject) DO NOTHING;
+
+-- name: GetUserByEmailForUpdate :one
+SELECT id, (email_verified_at IS NOT NULL)::boolean AS email_verified
+FROM users WHERE email = $1 FOR UPDATE;
+
+-- name: CreateVerifiedOAuthUserIfAbsent :one
+INSERT INTO users (email, password_hash, email_verified_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (email) DO NOTHING
+RETURNING id;
+
+-- name: ClaimUnverifiedUser :exec
+-- Pre-hijack defense (I10, AC-O12): linking OAuth to an unverified account wipes its password and marks it verified.
+UPDATE users SET password_hash = $2, email_verified_at = $3 WHERE id = $1 AND email_verified_at IS NULL;
+
+-- name: DeleteAllUnusedEmailTokens :exec
+DELETE FROM email_tokens WHERE user_id = $1 AND used_at IS NULL;

@@ -27,9 +27,17 @@ func TestPasswordRoundTrip(t *testing.T) {
 }
 
 func TestVerifyRejectsMalformed(t *testing.T) {
-	for _, bad := range []string{"", "plain", "$argon2i$v=19$m=1,t=1,p=1$AA$AA", "$argon2id$v=19$m=x$AA$AA"} {
+	for _, bad := range []string{"", "plain", OAuthOnlyPasswordHash, "$argon2i$v=19$m=1,t=1,p=1$AA$AA", "$argon2id$v=19$m=x$AA$AA"} {
 		if ok, err := VerifyPassword("x", bad); ok || err == nil {
 			t.Errorf("%q: ok=%v err=%v", bad, ok, err)
+		}
+	}
+}
+
+func TestOAuthOnlyHashNeverVerifies(t *testing.T) {
+	for _, pw := range []string{"", "!oauth", "correct-horse-battery", "$argon2id$v=19$m=19456,t=2,p=1$AA$AA"} {
+		if ok, err := VerifyPassword(pw, OAuthOnlyPasswordHash); ok || err == nil {
+			t.Fatalf("VerifyPassword(%q, %q) = (%v, %v), want (false, non-nil err)", pw, OAuthOnlyPasswordHash, ok, err)
 		}
 	}
 }
