@@ -223,6 +223,20 @@ E2E_URL="$APP_URL" pnpm -F e2e test
 
 หมายเหตุ: `curl -I` (HEAD) ที่ `/` ของ B ได้ 405 มาตั้งแต่ก่อนรอบนี้ ตรวจ header ด้วย GET (`curl -s -D - -o /dev/null <URL>/`)
 
+## 3.6 รอบ pilot-oauth (Login ด้วย Google/GitHub และ Turnstile) deploy 2026-11-19
+
+ลำดับที่ใช้จริง (migration เพิ่มตารางอย่างเดียว โค้ดเก่ารันกับ schema ใหม่ได้ แต่ต้อง migrate ก่อน deploy เสมอ):
+1. **สมัครบริการ (ตะวันทำ):** Google Cloud > Google Auth Platform: OAuth client แบบ Web application ตัวเดียวใส่ redirect URI 2 อัน (A และ B `/api/auth/oauth/google/callback`) สถานะ Testing ขอ scope `openid email profile` และเพิ่มอีเมลผู้ทดสอบใน Audience > Test users; GitHub > Developer settings > OAuth Apps: แอปเดียวใส่ redirect URI 2 อัน (GitHub ให้ได้สูงสุด 10) ปิด wildcard และ Device Flow; Cloudflare > Turnstile: widget Managed ตัวเดียวใส่ hostname ของ A และ B
+2. **Secret (ตะวันตั้งเอง):** `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TURNSTILE_SECRET` ที่ A ด้วย `npx --yes wrangler@4.163.0 secret put <ชื่อ> --env production` และที่ B ในหน้า Environment ของ Render (เลือก **Save only** ก่อน) ต้องตั้งให้ครบก่อน deploy เพราะถ้าขาด `TURNSTILE_SECRET` การสมัครและลืมรหัสผ่านจะปฏิเสธทุกครั้ง (fail closed)
+3. **ตัวแปรสาธารณะ:** `TURNSTILE_SITE_KEY` ใน `[env.production.vars]` ของ A (`backend-a/wrangler.toml`) และบน Render ต้องเพิ่มเองใน Environment ด้วย เพราะ Render ไม่ดึงค่าจาก `render.yaml` เข้าบริการที่มีอยู่แล้ว (ตอน deploy ครั้งแรก `/api/config` ของ B ตอบ `turnstileSiteKey: null` จนเพิ่มเอง) และ `TRUSTED_PROXY_HOPS` (ดูข้อ 6)
+4. **A:** `wrangler d1 migrations apply DB --env production --remote` (0003_oauth.sql) แล้ว `pnpm -F web build` และ `wrangler deploy --env production`
+5. **B:** ตะวันรัน `go run ./cmd/migrate up` ใน `backend-b` ด้วย Neon Direct URL (00003_oauth.sql) แล้วจึง `git push origin main` ให้ Render deploy
+6. **`TRUSTED_PROXY_HOPS` บน Render = 2:** วัดจริง 2026-11-19 ด้วยการยิง `/api/auth/oauth/google/start` 40 ครั้งโดยปลอม `X-Forwarded-For` ต่างกันทุกครั้ง: ค่า 1 ปล่อยผ่าน 36 ครั้ง (กุญแจเป็น proxy ที่เปลี่ยนไปมา ไม่ใช่ลูกค้า), ค่า 2 ปล่อยผ่าน 31 ครั้งแล้วบล็อก (กุญแจเป็นที่อยู่ลูกค้า และปลอมค่าซ้ายไม่ได้ผล) ถ้าไม่มีครั้งไหนถูกบล็อก แปลว่าค่านั้นเชื่อค่าที่ผู้ใช้ปลอมได้ ให้ลดค่าลงทันที ทดสอบซ้ำทุกครั้งที่เปลี่ยนโครงสร้างหน้าบ้านของ Render ค่าตั้งต้นของโค้ดคือ 0 (ไม่เชื่อ header นี้)
+7. **Smoke ทั้งสอง URL:** `/api/test/mail` ได้ 404; `/api/config` ได้ site key; `/api/auth/oauth/google/start` ได้ 302 ไป `https://accounts.google.com/` (ไม่ใช่ localhost) พร้อม cookie `__Host-oauth` (`HttpOnly; Secure; SameSite=Lax`) และ `redirect_uri` ตรงกับ URL ของฝั่งนั้น; provider ที่ไม่รู้จักได้ 404; สมัครโดยไม่มี captcha และด้วย `fake-pass` ได้ 403 `captcha_failed` (พิสูจน์ว่าโหมดทดสอบปิด); CSP เพิ่มเฉพาะ `https://challenges.cloudflare.com` ใน `script-src` และ `frame-src`
+8. **ตะวันทดสอบเอง:** กดเข้าสู่ระบบด้วย Google และ GitHub บน A และ B (ผ่านทั้งหมด 2026-11-19), widget Turnstile ขึ้นและยืนยันได้ในหน้าสมัครและลืมรหัสผ่าน
+
+หมายเหตุ: แอป Google สถานะ Testing ให้เฉพาะอีเมลใน Test users เข้าได้ และ Resend แบบไม่มีโดเมนส่งอีเมลได้เฉพาะถึงเจ้าของบัญชี Resend
+
 ## 4. การเฝ้าดูตาม ADR-002 (Error 1102 บน `/api/auth/*` ของ Backend A)
 
 ตาม `docs/architecture.md` (ADR-002) Backend A ใช้ Argon2id (`m=19456 KiB, t=2, p=1` ตามเกณฑ์ OWASP) บน Cloudflare Workers Free ซึ่งกำหนดเพดาน CPU ไว้ที่ 10 ms ต่อคำขอ (ผลวัดจริงใน `spikes/RESULTS.md` ใช้ CPU ราว 54 ms median เฉพาะตอนสมัครและเข้าสู่ระบบ)
