@@ -30,6 +30,13 @@ describe("captcha", () => {
     expect(await mailCountAfterPause(email)).toBe(1);
   });
 
+  it("AC-T4: failed captchas on forgot password do not use up the owner's hourly quota", async () => {
+    const { email } = await registerUser(); // 1 verify mail
+    for (let i = 0; i < 4; i++) expect((await post("/api/auth/password/forgot", { email, captcha: "nope" })).status).toBe(403);
+    expect((await anon().POST("/api/auth/password/forgot", { body: { email, captcha: CAPTCHA } })).response.status).toBe(204);
+    expect(await mailCountAfterPause(email)).toBe(2);
+  });
+
   it("AC-T2: a valid captcha keeps register and forgot working", async () => {
     const email = uniqueEmail();
     const reg = await anon().POST("/api/auth/register", { body: { email, password: PASSWORD, captcha: CAPTCHA } });
