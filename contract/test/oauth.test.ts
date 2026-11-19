@@ -53,12 +53,16 @@ describe("oauth", () => {
   it("AC-O12: linking to an unverified password account wipes the squatter's password and sessions", async () => {
     const email = uniqueEmail();
     const squatter = await registerUnverified(email); // someone else registered our email first
+    const pendingToken = tokenFrom(await waitForMail(email, 1), "verify-email"); // a mailed link the squatter could still use
     const { location, session } = await oauthLogin("google", googleUser(email));
     expect(location).toBe("/");
     expect((await me(session))?.email).toBe(email);
     expect((await squatter.api.GET("/api/me")).response.status).toBe(401);
     const login = await anon().POST("/api/auth/login", { body: { email, password: PASSWORD } });
     expect(login.response.status).toBe(401);
+    // unused email tokens of the squatted account are gone too (I10)
+    const used = await anon().POST("/api/auth/verify-email", { body: { token: pendingToken } });
+    expect(used.response.status).toBe(400);
   });
 
   it("AC-O12: linking to a verified password account keeps its password", async () => {
@@ -162,6 +166,16 @@ describe("oauth", () => {
     expect(two.location).toBe("/");
     expect((await me(two.session))?.email).toBe(first.email);
     expect((await me(one.session))?.email).toBe(first.email);
+  });
+
+  it("AC-O9: a linked GitHub subject still signs in when its emails are no longer verified", async () => {
+    const first = githubUser();
+    const one = await oauthLogin("github", first);
+    expect(one.location).toBe("/");
+    // same GitHub id, but the primary email is now unverified: identity is (provider, subject), not the email
+    const two = await oauthLogin("github", { id: first.id, emails: [{ email: uniqueEmail(), primary: true, verified: false }] });
+    expect(two.location).toBe("/");
+    expect((await me(two.session))?.email).toBe(first.emails[0].email);
   });
 
   it("AC-O10: a cancelled login or a failing provider ends at the error page, not a 500", async () => {
