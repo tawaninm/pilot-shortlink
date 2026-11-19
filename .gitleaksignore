@@ -1,0 +1,3 @@
+# Test fixtures, not secrets (2026-11-19): sample SHA-256 hex in schema.rs AC-V9 test, sample Idempotency-Key in mail_test.go
+02d6e171e3a64f32da82bbd437a2f35dece22fc9:backend-b/internal/mail/mail_test.go:generic-api-key:122
+6792f8d00019b2e8db65a22082823fb19e7039d6:backend-a/tests/schema.rs:generic-api-key:334
