@@ -3,9 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use worker::*;
 
-use crate::auth::{
-    consume_rate_limit, is_valid_email, normalize_email, OAUTH_ONLY_PASSWORD_HASH,
-};
+use crate::auth::{consume_rate_limit, is_valid_email, normalize_email, OAUTH_ONLY_PASSWORD_HASH};
 use crate::http::{
     client_ip, encode_form_urlencoded, fetch_text_with_timeout, now_sec, read_env_string,
     OUTBOUND_FETCH_TIMEOUT,
@@ -44,14 +42,14 @@ pub const FAKE_CLIENT_ID: &str = "fake-client";
 pub const FAKE_CLIENT_SECRET: &str = "fake-secret";
 
 /// SQL statements shared with `tests/schema.rs` so SQLite tests exercise the exact queries handlers run.
-pub const DELETE_EXPIRED_OAUTH_STATES_SQL: &str =
-    "DELETE FROM oauth_states WHERE expires_at <= ?1";
+pub const DELETE_EXPIRED_OAUTH_STATES_SQL: &str = "DELETE FROM oauth_states WHERE expires_at <= ?1";
 pub const INSERT_OAUTH_STATE_SQL: &str =
     "INSERT INTO oauth_states (state_hash, provider, verifier, expires_at) VALUES (?1, ?2, ?3, ?4)";
 pub const CONSUME_OAUTH_STATE_SQL: &str = "DELETE FROM oauth_states \
     WHERE state_hash = ?1 AND provider = ?2 AND expires_at > ?3 \
     RETURNING verifier";
-pub const INSERT_OAUTH_ACCOUNT_SQL: &str = "INSERT INTO oauth_accounts (provider, subject, user_id, created_at) \
+pub const INSERT_OAUTH_ACCOUNT_SQL: &str =
+    "INSERT INTO oauth_accounts (provider, subject, user_id, created_at) \
     VALUES (?1, ?2, ?3, ?4) \
     ON CONFLICT(provider, subject) DO NOTHING";
 pub const SELECT_OAUTH_ACCOUNT_USER_SQL: &str =
@@ -505,8 +503,8 @@ async fn fetch_json_bearer(
     init.with_method(Method::Get);
     init.with_headers(headers);
 
-    let req = Request::new_with_init(url, &init)
-        .map_err(|_| OAuthFailureReason::IdentityFetchFailed)?;
+    let req =
+        Request::new_with_init(url, &init).map_err(|_| OAuthFailureReason::IdentityFetchFailed)?;
     fetch_text_with_timeout(req, OUTBOUND_FETCH_TIMEOUT)
         .await
         .map_err(|_| OAuthFailureReason::IdentityFetchFailed)
@@ -518,9 +516,13 @@ async fn fetch_identity(
 ) -> std::result::Result<OAuthIdentity, OAuthFailureReason> {
     match config.provider {
         Provider::Google => {
-            let text =
-                fetch_json_bearer(&config.userinfo_url, access_token, "application/json", false)
-                    .await?;
+            let text = fetch_json_bearer(
+                &config.userinfo_url,
+                access_token,
+                "application/json",
+                false,
+            )
+            .await?;
             parse_google_userinfo(&text).ok_or(OAuthFailureReason::IdentityFetchFailed)
         }
         Provider::Github => {
@@ -549,13 +551,15 @@ async fn fetch_identity(
             .await?;
             let emails: Vec<GithubEmail> = serde_json::from_str(&emails_text)
                 .map_err(|_| OAuthFailureReason::IdentityFetchFailed)?;
-            let email = select_github_primary_verified_email(&emails)
-                .ok_or(OAuthFailureReason::EmailUnverified)?;
+            // Identity is (provider, subject): a missing primary+verified email must not stop an already
+            // linked account from signing in (I2, AC-O9). resolve_or_create_user refuses to link or create
+            // when email_verified is false.
+            let email = select_github_primary_verified_email(&emails);
 
             Ok(OAuthIdentity {
                 subject,
-                email: Some(email),
-                email_verified: true,
+                email_verified: email.is_some(),
+                email,
             })
         }
     }
@@ -905,8 +909,8 @@ async fn run_oauth_callback(
         .headers()
         .get("Cookie")
         .map_err(|_| OAuthFailureReason::StateMismatch)?;
-    let cookie_state = extract_oauth_cookie(cookie_header.as_deref())
-        .ok_or(OAuthFailureReason::StateMismatch)?;
+    let cookie_state =
+        extract_oauth_cookie(cookie_header.as_deref()).ok_or(OAuthFailureReason::StateMismatch)?;
     if !constant_time_eq(cookie_state.as_bytes(), state.as_bytes()) {
         return Err(OAuthFailureReason::StateMismatch);
     }
@@ -970,14 +974,8 @@ mod tests {
 
     #[test]
     fn fake_mode_is_ignored_when_app_origin_is_not_local() {
-        assert!(is_fake_oauth_enabled(
-            Some("fake"),
-            "http://localhost:8787"
-        ));
-        assert!(is_fake_oauth_enabled(
-            Some("fake"),
-            "http://127.0.0.1:8787"
-        ));
+        assert!(is_fake_oauth_enabled(Some("fake"), "http://localhost:8787"));
+        assert!(is_fake_oauth_enabled(Some("fake"), "http://127.0.0.1:8787"));
         assert!(!is_fake_oauth_enabled(
             Some("fake"),
             "https://pilot-shortlink-a.workers.dev"
@@ -1033,7 +1031,10 @@ mod tests {
             local_github.token_url,
             "http://127.0.0.1:9411/github/login/oauth/access_token"
         );
-        assert_eq!(local_github.userinfo_url, "http://127.0.0.1:9411/github/user");
+        assert_eq!(
+            local_github.userinfo_url,
+            "http://127.0.0.1:9411/github/user"
+        );
         assert_eq!(
             local_github.emails_url.as_deref(),
             Some("http://127.0.0.1:9411/github/user/emails")
@@ -1128,14 +1129,20 @@ mod tests {
         assert!(auth_url.starts_with(GOOGLE_AUTHORIZE_URL));
         let parsed = Url::parse(&auth_url).expect("parse authorize url");
         let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
-        assert_eq!(params.get("response_type").map(String::as_str), Some("code"));
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
         assert_eq!(params.get("client_id").map(String::as_str), Some("cid-123"));
         assert_eq!(
             params.get("redirect_uri").map(String::as_str),
             Some(redirect_uri.as_str())
         );
         assert_eq!(params.get("scope").map(String::as_str), Some(GOOGLE_SCOPE));
-        assert_eq!(params.get("state").map(String::as_str), Some("state_abc123"));
+        assert_eq!(
+            params.get("state").map(String::as_str),
+            Some("state_abc123")
+        );
         assert_eq!(
             params.get("code_challenge").map(String::as_str),
             Some(challenge.as_str())
@@ -1207,7 +1214,10 @@ mod tests {
     #[test]
     fn oauth_start_errors_map_to_redirect_and_single_line_reason_log_without_500() {
         let cases = [
-            (OAuthStartStep::RateLimitDb, OAuthFailureReason::AccountError),
+            (
+                OAuthStartStep::RateLimitDb,
+                OAuthFailureReason::AccountError,
+            ),
             (
                 OAuthStartStep::RateLimitExceeded,
                 OAuthFailureReason::RateLimited,
@@ -1233,8 +1243,7 @@ mod tests {
 
         for provider in [Provider::Google, Provider::Github] {
             for (step, expected_reason) in cases {
-                let (status, location, reason, log_line) =
-                    oauth_start_failure_spec(provider, step);
+                let (status, location, reason, log_line) = oauth_start_failure_spec(provider, step);
                 assert_eq!(status, 302);
                 assert_eq!(location, OAUTH_ERROR_LOCATION);
                 assert_eq!(reason, expected_reason);

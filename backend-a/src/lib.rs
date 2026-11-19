@@ -203,15 +203,8 @@ async fn route_request(
                 None,
             )),
             (Method::Post, "/api/auth/password/forgot") => Ok((
-                auth::handle_forgot_password(
-                    req,
-                    &db,
-                    &app_origin,
-                    mailer,
-                    &captcha_verifier,
-                    ctx,
-                )
-                .await?,
+                auth::handle_forgot_password(req, &db, &app_origin, mailer, &captcha_verifier, ctx)
+                    .await?,
                 None,
             )),
             (Method::Post, "/api/auth/password/reset") => {
@@ -227,14 +220,18 @@ async fn route_request(
                         )),
                         None => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
                     },
-                    Some((raw_provider, "callback")) => match oauth::Provider::parse(raw_provider) {
-                        Some(provider) => Ok((
-                            oauth::handle_oauth_callback(req, env, &db, &app_origin, provider)
-                                .await?,
-                            None,
-                        )),
-                        None => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
-                    },
+                    Some((raw_provider, "callback")) => {
+                        match oauth::Provider::parse(raw_provider) {
+                            Some(provider) => Ok((
+                                oauth::handle_oauth_callback(req, env, &db, &app_origin, provider)
+                                    .await?,
+                                None,
+                            )),
+                            None => {
+                                Ok((http::problem_response(404, "Not Found", "not_found")?, None))
+                            }
+                        }
+                    }
                     _ => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
                 }
             }

@@ -500,12 +500,17 @@ fn oauth_accounts_and_states_schema_constraints_and_atomic_expiry() {
         .prepare("PRAGMA table_info(oauth_accounts)")
         .expect("pragma oauth_accounts");
     let acct_info: Vec<(String, i64)> = acct_stmt
-        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })
         .expect("query oauth_accounts info")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect oauth_accounts info");
     let acct_cols: Vec<String> = acct_info.iter().map(|(c, _)| c.clone()).collect();
-    assert_eq!(acct_cols, vec!["provider", "subject", "user_id", "created_at"]);
+    assert_eq!(
+        acct_cols,
+        vec!["provider", "subject", "user_id", "created_at"]
+    );
     let acct_pks: Vec<(String, i64)> = acct_info.into_iter().filter(|(_, pk)| *pk > 0).collect();
     assert_eq!(
         acct_pks,
@@ -527,7 +532,9 @@ fn oauth_accounts_and_states_schema_constraints_and_atomic_expiry() {
         .prepare("PRAGMA table_info(oauth_states)")
         .expect("pragma oauth_states");
     let state_info: Vec<(String, i64)> = state_stmt
-        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })
         .expect("query oauth_states info")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect oauth_states info");
@@ -565,7 +572,10 @@ fn oauth_accounts_and_states_schema_constraints_and_atomic_expiry() {
         "INSERT INTO oauth_accounts (provider, subject, user_id, created_at) VALUES ('google', 'sub1', 1, 1700000001)",
         [],
     );
-    assert!(dup_pk.is_err(), "duplicate (provider, subject) must violate PK");
+    assert!(
+        dup_pk.is_err(),
+        "duplicate (provider, subject) must violate PK"
+    );
 
     // Deleting user cascades to oauth_accounts.
     conn.execute("DELETE FROM users WHERE id = 1", [])
@@ -687,13 +697,21 @@ fn ac_o12_pre_hijack_sql_wipes_unverified_state_and_preserves_verified_state() {
     // Run F1 + F3 batch on unverified user 1.
     conn.execute(
         INSERT_OAUTH_ACCOUNT_SQL,
-        rusqlite::params![Provider::Google.as_str(), "sub-victim", 1_i64, 1_700_000_000_i64],
+        rusqlite::params![
+            Provider::Google.as_str(),
+            "sub-victim",
+            1_i64,
+            1_700_000_000_i64
+        ],
     )
     .expect("link oauth account for user 1");
     conn.execute(WIPE_UNVERIFIED_USER_SESSIONS_SQL, rusqlite::params![1_i64])
         .expect("wipe squatter sessions");
-    conn.execute(WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL, rusqlite::params![1_i64])
-        .expect("wipe squatter unused email tokens");
+    conn.execute(
+        WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL,
+        rusqlite::params![1_i64],
+    )
+    .expect("wipe squatter unused email tokens");
     conn.execute(
         CLAIM_UNVERIFIED_USER_SQL,
         rusqlite::params![OAUTH_ONLY_PASSWORD_HASH, 1_i64],
@@ -720,7 +738,9 @@ fn ac_o12_pre_hijack_sql_wipes_unverified_state_and_preserves_verified_state() {
     assert!(u1_verified.is_some());
 
     let u1_sessions: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sessions WHERE user_id = 1", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM sessions WHERE user_id = 1", [], |r| {
+            r.get(0)
+        })
         .expect("count user 1 sessions");
     assert_eq!(u1_sessions, 0);
 
@@ -745,13 +765,21 @@ fn ac_o12_pre_hijack_sql_wipes_unverified_state_and_preserves_verified_state() {
     // Even if the wipe/claim SQL were executed against verified user 2, the email_verified_at IS NULL guard keeps it intact.
     conn.execute(
         INSERT_OAUTH_ACCOUNT_SQL,
-        rusqlite::params![Provider::Github.as_str(), "sub-owner", 2_i64, 1_700_000_000_i64],
+        rusqlite::params![
+            Provider::Github.as_str(),
+            "sub-owner",
+            2_i64,
+            1_700_000_000_i64
+        ],
     )
     .expect("link oauth account for user 2");
     conn.execute(WIPE_UNVERIFIED_USER_SESSIONS_SQL, rusqlite::params![2_i64])
         .expect("no-op wipe sessions on verified user 2");
-    conn.execute(WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL, rusqlite::params![2_i64])
-        .expect("no-op wipe tokens on verified user 2");
+    conn.execute(
+        WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL,
+        rusqlite::params![2_i64],
+    )
+    .expect("no-op wipe tokens on verified user 2");
     conn.execute(
         CLAIM_UNVERIFIED_USER_SQL,
         rusqlite::params![OAUTH_ONLY_PASSWORD_HASH, 2_i64],
@@ -769,7 +797,9 @@ fn ac_o12_pre_hijack_sql_wipes_unverified_state_and_preserves_verified_state() {
     assert_eq!(u2_verified.as_deref(), Some("2026-11-19T00:00:00.000Z"));
 
     let u2_sessions: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sessions WHERE user_id = 2", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM sessions WHERE user_id = 2", [], |r| {
+            r.get(0)
+        })
         .expect("count user 2 sessions");
     assert_eq!(u2_sessions, 1);
 
@@ -785,7 +815,12 @@ fn ac_o12_pre_hijack_sql_wipes_unverified_state_and_preserves_verified_state() {
     // F3: duplicate INSERT ... ON CONFLICT DO NOTHING keeps original user_id, and re-read returns original owner.
     conn.execute(
         INSERT_OAUTH_ACCOUNT_SQL,
-        rusqlite::params![Provider::Google.as_str(), "sub-victim", 2_i64, 1_700_000_001_i64],
+        rusqlite::params![
+            Provider::Google.as_str(),
+            "sub-victim",
+            2_i64,
+            1_700_000_001_i64
+        ],
     )
     .expect("conflict do nothing");
     let still_u1: i64 = conn

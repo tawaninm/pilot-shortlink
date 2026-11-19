@@ -292,21 +292,17 @@ pub async fn issue_email_token(
     let token_hash = hash_email_token(&token);
     let expires_at = email_token_expires_at(now_sec);
 
-    let del_stmt = db
-        .prepare(DELETE_UNUSED_EMAIL_TOKENS_SQL)
-        .bind(&[
-            wasm_bindgen::JsValue::from_f64(user_id as f64),
-            purpose.as_str().into(),
-        ])?;
+    let del_stmt = db.prepare(DELETE_UNUSED_EMAIL_TOKENS_SQL).bind(&[
+        wasm_bindgen::JsValue::from_f64(user_id as f64),
+        purpose.as_str().into(),
+    ])?;
 
-    let ins_stmt = db
-        .prepare(INSERT_EMAIL_TOKEN_SQL)
-        .bind(&[
-            token_hash.as_str().into(),
-            wasm_bindgen::JsValue::from_f64(user_id as f64),
-            purpose.as_str().into(),
-            wasm_bindgen::JsValue::from_f64(expires_at as f64),
-        ])?;
+    let ins_stmt = db.prepare(INSERT_EMAIL_TOKEN_SQL).bind(&[
+        token_hash.as_str().into(),
+        wasm_bindgen::JsValue::from_f64(user_id as f64),
+        purpose.as_str().into(),
+        wasm_bindgen::JsValue::from_f64(expires_at as f64),
+    ])?;
 
     db.batch(vec![del_stmt, ins_stmt]).await?;
     Ok((token, token_hash))
@@ -360,10 +356,7 @@ pub async fn handle_register(
         .verify(creds.captcha.as_deref(), remote_ip.as_deref())
         .await
     {
-        return Ok((
-            problem_response(403, "Forbidden", "captcha_failed")?,
-            None,
-        ));
+        return Ok((problem_response(403, "Forbidden", "captcha_failed")?, None));
     }
 
     if !is_valid_password_len(&creds.password) {
@@ -656,12 +649,16 @@ pub async fn handle_forgot_password(
     let now = now_sec();
     let (window_start, _) = hourly_window(now);
 
-    let (decision, maybe_email) =
-        evaluate_forgot_password_gates(&raw_body, captcha, remote_ip.as_deref(), |email| async move {
+    let (decision, maybe_email) = evaluate_forgot_password_gates(
+        &raw_body,
+        captcha,
+        remote_ip.as_deref(),
+        |email| async move {
             let rate_key = format!("forgot:{email}");
             consume_rate_limit(db, &rate_key, window_start, now).await
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     let email = match decision {
         ForgotPasswordDecision::InvalidBody => {
@@ -854,7 +851,10 @@ mod tests {
 
         for candidate in ["correct-horse-battery", "!oauth", ""] {
             let (ok_raw, _) = verify_password_argon2id(candidate, OAUTH_ONLY_PASSWORD_HASH);
-            assert!(!ok_raw, "!oauth must never verify for password {candidate:?}");
+            assert!(
+                !ok_raw,
+                "!oauth must never verify for password {candidate:?}"
+            );
             let (ok_dummy, _) = verify_password_argon2id(candidate, selected);
             assert!(!ok_dummy);
         }
@@ -879,8 +879,8 @@ mod tests {
 
         let reg_missing_captcha =
             br#"{"email":"a@example.com","password":"correct-horse-battery"}"#;
-        let parsed_reg =
-            serde_json::from_slice::<RegisterBody>(reg_missing_captcha).expect("missing captcha parses");
+        let parsed_reg = serde_json::from_slice::<RegisterBody>(reg_missing_captcha)
+            .expect("missing captcha parses");
         assert_eq!(parsed_reg.captcha, None);
 
         let extra_token = br#"{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","extra":1}"#;

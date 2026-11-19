@@ -14,7 +14,17 @@ function loadTurnstileScript(): Promise<void> {
   const existing = document.querySelector<HTMLScriptElement>(`script[src="${TURNSTILE_SCRIPT_URL}"]`);
   if (existing) {
     scriptPromise = new Promise<void>((resolve, reject) => {
-      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener(
+        "load",
+        () => {
+          if (window.turnstile) return resolve();
+          // loaded but empty (for example emptied by a blocker): drop it so a retry can fetch it again
+          scriptPromise = null;
+          existing.remove();
+          reject(new Error("Turnstile script did not define window.turnstile"));
+        },
+        { once: true },
+      );
       existing.addEventListener(
         "error",
         () => {
@@ -32,7 +42,12 @@ function loadTurnstileScript(): Promise<void> {
     script.src = TURNSTILE_SCRIPT_URL;
     script.async = true;
     script.defer = true;
-    script.onload = () => resolve();
+    script.onload = () => {
+      if (window.turnstile) return resolve();
+      scriptPromise = null;
+      script.remove();
+      reject(new Error("Turnstile script did not define window.turnstile"));
+    };
     script.onerror = () => {
       scriptPromise = null;
       script.remove();
@@ -72,15 +87,24 @@ export function useTurnstile(enabled: boolean) {
         renderedId = window.turnstile.render(ref.current, {
           sitekey: siteKey,
           callback: (nextToken) => {
-            if (!cancelled) setToken(nextToken);
+            if (cancelled) return;
+            setToken(nextToken);
+            setScriptError(false);
           },
           "expired-callback": () => {
             if (!cancelled) setToken(null);
           },
           "error-callback": () => {
-            if (!cancelled) setToken(null);
+            if (cancelled) return;
+            setToken(null);
+            setScriptError(true); // the widget gave up: say so instead of leaving a dead form
           },
         });
+        if (!renderedId) {
+          renderedId = null;
+          setScriptError(true);
+          return;
+        }
         widgetIdRef.current = renderedId;
       })
       .catch(() => {
@@ -100,6 +124,7 @@ export function useTurnstile(enabled: boolean) {
   const reset = useCallback(() => {
     if (!active) return;
     setToken(null);
+    setScriptError(false);
     if (widgetIdRef.current !== null) {
       window.turnstile?.reset(widgetIdRef.current);
     }

@@ -223,13 +223,19 @@ pub fn is_capture_env(env: &Env) -> bool {
     is_capture_mode(mode.as_deref()) && is_local_origin(&origin)
 }
 
-/// True for `http://localhost[:port]` and `http://127.0.0.1[:port]` only.
+/// True for `http://localhost[:port]` and `http://127.0.0.1[:port]` only (parsed, not a prefix match, so
+/// `http://localhost:8787@evil.com` and `http://localhost:8787/x` are not local).
 pub fn is_local_origin(origin: &str) -> bool {
-    ["http://localhost", "http://127.0.0.1"].iter().any(|base| {
-        origin
-            .strip_prefix(base)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
-    })
+    let Ok(url) = worker::Url::parse(origin) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+        && matches!(url.path(), "" | "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 /// Escapes HTML special characters in a URL or text segment.
@@ -539,6 +545,11 @@ mod tests {
         ));
         assert!(!is_local_origin("http://localhost.evil.test"));
         assert!(!is_local_origin("http://localhostx:8787"));
+        assert!(is_local_origin("http://localhost/"));
+        assert!(!is_local_origin("http://localhost:8787@evil.com"));
+        assert!(!is_local_origin("http://localhost:8787/x"));
+        assert!(!is_local_origin("http://localhost:8787?x=1"));
+        assert!(!is_local_origin("https://localhost:8787"));
     }
 
     #[test]
