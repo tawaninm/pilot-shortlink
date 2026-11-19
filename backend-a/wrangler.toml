@@ -34,7 +34,7 @@ migrations_dir = "migrations"
 
 [env.production.vars]
 APP_ORIGIN = "https://pilot-shortlink-a.pilot-shortlink-hash-cpu-spike.workers.dev" # subdomain auto-named by the first spike; Tawan may rename it later (then change this and redeploy)
-TURNSTILE_SITE_KEY = "" # public Cloudflare Turnstile site key; Tawan fills the real key before deploy
+TURNSTILE_SITE_KEY = "0x4AAAAAAGI0V4iFMlXGFN-0" # public Cloudflare Turnstile site key (not a secret; the secret key is TURNSTILE_SECRET)
 
 [env.production.observability]
 enabled = true

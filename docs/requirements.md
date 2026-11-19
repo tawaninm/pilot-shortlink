@@ -68,7 +68,7 @@ P1 รอบ OAuth และกันบอท (ตะวันสั่ง 2026
 - ไม่ซื้อโดเมน (ตะวันเลือก 2026-11-19): ผู้ส่งเป็น `onboarding@resend.dev` ซึ่ง Resend ส่งได้แค่ถึงอีเมลของเจ้าของบัญชี Resend ผู้ใช้คนอื่นบน production สมัครได้แต่จะไม่ได้รับอีเมล จนกว่าจะมีโดเมนที่ยืนยันกับ Resend แล้ว
 - เทสต์อัตโนมัติไม่เรียก Resend จริง ใช้ adapter `capture` ที่เปิดด้วย `MAIL_MODE=capture` เท่านั้น
 - เทสต์อัตโนมัติไม่เรียก Google, GitHub หรือ Cloudflare จริง ใช้ fake IdP (`OAUTH_MODE=fake`, `OAUTH_FAKE_BASE`) และ `TURNSTILE_MODE=fake` ที่เปิดได้เฉพาะ `APP_ORIGIN` เป็น localhost
-- Secret ใหม่ต่อ backend ตะวันตั้งเอง: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TURNSTILE_SECRET` และค่าสาธารณะ `TURNSTILE_SITE_KEY`; GitHub OAuth App แยก A กับ B (callback ได้ URL เดียวต่อแอป), Google OAuth client เดียวใส่ redirect URI สองอัน สถานะ Testing ขอแค่ `openid email profile`
+- Secret ใหม่ต่อ backend ตะวันตั้งเอง: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `TURNSTILE_SECRET` และค่าสาธารณะ `TURNSTILE_SITE_KEY`; GitHub OAuth App และ Google OAuth client อย่างละ 1 ตัวใช้ร่วมกันทั้ง A และ B โดยใส่ redirect URI สองอัน (GitHub ให้ได้สูงสุด 10 อัน ปิด wildcard และ Device Flow) Google สถานะ Testing ขอแค่ `openid email profile` ผู้ทดสอบต้องอยู่ใน Test users
 - โปรเจกต์อยู่ที่ `D:\TAWAN-OS\pilot-shortlink\` นอก Obsidian vault
 - ไม่เดาแทนตะวันเรื่องบัญชีและ login ของ Cloudflare, Render, Neon, GitHub
 

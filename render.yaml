@@ -34,7 +34,7 @@ services:
       - key: MAIL_FROM
         sync: false
       - key: TURNSTILE_SITE_KEY
-        value: "" # Tawan fills the Cloudflare Turnstile public site key
+        value: "0x4AAAAAAGI0V4iFMlXGFN-0" # public Cloudflare Turnstile site key (not a secret; the secret key is TURNSTILE_SECRET)
       - key: TURNSTILE_SECRET
         sync: false
       - key: GOOGLE_CLIENT_ID
