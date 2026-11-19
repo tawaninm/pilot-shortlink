@@ -8,6 +8,8 @@ package gen
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const bumpRate = `-- name: BumpRate :one
@@ -30,17 +32,18 @@ func (q *Queries) BumpRate(ctx context.Context, arg BumpRateParams) (int32, erro
 }
 
 const consumeEmailToken = `-- name: ConsumeEmailToken :one
-UPDATE email_tokens SET used_at = now() WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() RETURNING user_id
+UPDATE email_tokens SET used_at = $3 WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > $3 RETURNING user_id
 `
 
 type ConsumeEmailTokenParams struct {
 	TokenHash string
 	Purpose   string
+	UsedAt    pgtype.Timestamptz
 }
 
 // Atomic single-statement consume: concurrent requests cannot both consume the same token (AC-V7).
 func (q *Queries) ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (int64, error) {
-	row := q.db.QueryRow(ctx, consumeEmailToken, arg.TokenHash, arg.Purpose)
+	row := q.db.QueryRow(ctx, consumeEmailToken, arg.TokenHash, arg.Purpose, arg.UsedAt)
 	var user_id int64
 	err := row.Scan(&user_id)
 	return user_id, err
@@ -459,6 +462,17 @@ func (q *Queries) ListLinks(ctx context.Context, userID int64) ([]ListLinksRow, 
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockUser = `-- name: LockUser :one
+SELECT 1 FROM users WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockUser(ctx context.Context, id int64) (int32, error) {
+	row := q.db.QueryRow(ctx, lockUser, id)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const markEmailVerified = `-- name: MarkEmailVerified :exec

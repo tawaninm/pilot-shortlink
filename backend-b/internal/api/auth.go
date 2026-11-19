@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/auth"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
@@ -111,6 +112,9 @@ func (s *server) issueEmailToken(ctx context.Context, userID int64, purpose stri
 	defer func() { _ = tx.Rollback(ctx) }()
 	qtx := s.q.WithTx(tx)
 
+	if _, err := qtx.LockUser(ctx, userID); err != nil {
+		return "", "", err
+	}
 	if err := qtx.DeleteUnusedEmailTokens(ctx, gen.DeleteUnusedEmailTokensParams{UserID: userID, Purpose: purpose}); err != nil {
 		return "", "", err
 	}
@@ -280,7 +284,11 @@ type tokenBody struct {
 
 func (s *server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	var body tokenBody
-	if readJSON(w, r, &body) != nil || body.Token == nil || !tokenPattern.MatchString(*body.Token) {
+	if readJSON(w, r, &body) != nil || body.Token == nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
+		return
+	}
+	if !tokenPattern.MatchString(*body.Token) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "token")
 		return
 	}
@@ -296,6 +304,7 @@ func (s *server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	userID, err := qtx.ConsumeEmailToken(ctx, gen.ConsumeEmailTokenParams{
 		TokenHash: auth.HashToken(*body.Token),
 		Purpose:   mail.PurposeVerify,
+		UsedAt:    pgtype.Timestamptz{Time: s.Now(), Valid: true},
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeProblem(w, http.StatusBadRequest, "token_invalid", "")
@@ -370,7 +379,7 @@ func (s *server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n > mailRateMax {
-		writeRateLimited(w, int(window.Add(mailRateWindow).Sub(s.Now()).Seconds()))
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	user, err := s.q.GetUserByEmail(ctx, email)
@@ -382,12 +391,11 @@ func (s *server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	token, tokenHash, err := s.issueEmailToken(ctx, user.ID, mail.PurposeReset)
-	if err != nil {
-		s.fail(w, err)
-		return
+	if token, tokenHash, err := s.issueEmailToken(ctx, user.ID, mail.PurposeReset); err != nil {
+		s.Log.Error("mail_failed", "purpose", mail.PurposeReset)
+	} else {
+		s.sendMailAsync(ctx, mail.PurposeReset, mail.Build(mail.PurposeReset, email, s.AppOrigin, token, tokenHash))
 	}
-	s.sendMailAsync(ctx, mail.PurposeReset, mail.Build(mail.PurposeReset, email, s.AppOrigin, token, tokenHash))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -402,12 +410,12 @@ func (s *server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
 		return
 	}
-	if !tokenPattern.MatchString(*body.Token) {
-		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "token")
-		return
-	}
 	if n := utf8.RuneCountInString(*body.Password); n < 10 || n > 128 {
 		writeProblem(w, http.StatusUnprocessableEntity, "weak_password", "password")
+		return
+	}
+	if !tokenPattern.MatchString(*body.Token) {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "token")
 		return
 	}
 	ctx := r.Context()
@@ -422,6 +430,7 @@ func (s *server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	userID, err := qtx.ConsumeEmailToken(ctx, gen.ConsumeEmailTokenParams{
 		TokenHash: auth.HashToken(*body.Token),
 		Purpose:   mail.PurposeReset,
+		UsedAt:    pgtype.Timestamptz{Time: s.Now(), Valid: true},
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeProblem(w, http.StatusBadRequest, "token_invalid", "")

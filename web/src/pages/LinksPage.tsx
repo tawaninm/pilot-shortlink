@@ -2,7 +2,7 @@
 import { SignOut } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ApiError, api, call } from "../api";
 import { CreateLinkForm } from "../components/CreateLinkForm";
 import { LinkTable } from "../components/LinkTable";
@@ -19,6 +19,11 @@ export function LinksPage() {
     { kind: "idle" } | { kind: "busy" } | { kind: "sent"; email: string } | { kind: "error"; text: string }
   >({ kind: "idle" });
   const verifyBannerId = useId();
+  const resendStatusRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    if (resendState.kind === "sent") resendStatusRef.current?.focus();
+  }, [resendState.kind]);
 
   const me = useQuery({ queryKey: ["me"], queryFn: () => call(api.GET("/api/me")) });
   const links = useQuery({
@@ -98,18 +103,23 @@ export function LinksPage() {
 
         {unverified && (
           <div
-            id={verifyBannerId}
             role="status"
             aria-live="polite"
             className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-card border border-line-strong bg-raised p-4"
           >
-            <p className={resendState.kind === "error" ? "text-error" : undefined}>
-              {resendState.kind === "sent"
-                ? verifyBannerCopy.sent(resendState.email)
-                : resendState.kind === "error"
-                  ? resendState.text
-                  : verifyBannerCopy.unverified(me.data.email)}
-            </p>
+            <div className="flex flex-col gap-1">
+              <p id={verifyBannerId}>{verifyBannerCopy.unverified(me.data.email)}</p>
+              {resendState.kind === "sent" && (
+                <p ref={resendStatusRef} tabIndex={-1} className="text-sm">
+                  {verifyBannerCopy.sent(resendState.email)}
+                </p>
+              )}
+              {resendState.kind === "error" && (
+                <p role="alert" className="text-sm text-error">
+                  {resendState.text}
+                </p>
+              )}
+            </div>
             {resendState.kind !== "sent" && (
               <button
                 type="button"

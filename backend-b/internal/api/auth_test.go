@@ -104,12 +104,12 @@ func TestEmailTokensAndLogging(t *testing.T) {
 
 	t.Run("expired verify and reset tokens return 400 token_invalid", func(t *testing.T) {
 		c := mail.NewCapture()
-		// Injected clock 1 hour in the past: 30-min token expiry lands 30 min in the past.
+		now := time.Now()
 		h := api.NewHandler(api.Config{
 			Pool:      pool,
 			AppOrigin: testOrigin,
 			Log:       slog.New(slog.NewJSONHandler(&syncBuffer{}, nil)),
-			Now:       func() time.Time { return time.Now().Add(-time.Hour) },
+			Now:       func() time.Time { return now },
 			Mailer:    c,
 			Capture:   c,
 		})
@@ -120,6 +120,8 @@ func TestEmailTokensAndLogging(t *testing.T) {
 		}
 		verifyTok := waitCapturedToken(t, c, "exp@example.test", 1)
 
+		// Advance clock to exact 30-minute expiry boundary -> rejected.
+		now = now.Add(30 * time.Minute)
 		vRec := postJSON(t, h, "/api/auth/verify-email", `{"token":"`+verifyTok+`"}`)
 		if vRec.Code != http.StatusBadRequest || !strings.Contains(vRec.Body.String(), `"token_invalid"`) {
 			t.Fatalf("expired verify token: %d %s", vRec.Code, vRec.Body.String())
@@ -131,6 +133,7 @@ func TestEmailTokensAndLogging(t *testing.T) {
 		}
 		resetTok := waitCapturedToken(t, c, "exp@example.test", 2)
 
+		now = now.Add(30*time.Minute + time.Second)
 		rRec := postJSON(t, h, "/api/auth/password/reset", `{"token":"`+resetTok+`","password":"new-correct-horse-battery"}`)
 		if rRec.Code != http.StatusBadRequest || !strings.Contains(rRec.Body.String(), `"token_invalid"`) {
 			t.Fatalf("expired reset token: %d %s", rRec.Code, rRec.Body.String())
@@ -243,6 +246,111 @@ func TestEmailTokensAndLogging(t *testing.T) {
 		vRec := postJSON(t, h, "/api/auth/verify-email", `{"token":"`+tok+`"}`)
 		if vRec.Code != http.StatusBadRequest {
 			t.Fatalf("past expires_at verify: %d", vRec.Code)
+		}
+	})
+
+	t.Run("AC-V9: register stores only 64-hex SHA-256 token_hash and no column holds plain token", func(t *testing.T) {
+		c := mail.NewCapture()
+		h := api.NewHandler(api.Config{
+			Pool:      pool,
+			AppOrigin: testOrigin,
+			Log:       slog.New(slog.NewJSONHandler(&syncBuffer{}, nil)),
+			Mailer:    c,
+			Capture:   c,
+		})
+
+		email := "acv9-register@example.test"
+		rec := postJSON(t, h, "/api/auth/register", `{"email":"`+email+`","password":"correct-horse-battery"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
+		}
+		rawToken := waitCapturedToken(t, c, email, 1)
+
+		ctx := context.Background()
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'email_tokens'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var cols []string
+		for rows.Next() {
+			var col string
+			if err := rows.Scan(&col); err != nil {
+				t.Fatal(err)
+			}
+			cols = append(cols, col)
+			if lc := strings.ToLower(col); lc == "token" || strings.Contains(lc, "plain") || strings.Contains(lc, "raw") {
+				t.Fatalf("email_tokens has plain token column %q", col)
+			}
+		}
+		if len(cols) != 5 {
+			t.Fatalf("email_tokens columns = %v, want 5 columns", cols)
+		}
+
+		var storedHash, purpose string
+		var userID int64
+		var expiresAt time.Time
+		var usedAt *time.Time
+		err = pool.QueryRow(ctx, `
+			SELECT et.token_hash, et.user_id, et.purpose, et.expires_at, et.used_at
+			FROM email_tokens et
+			JOIN users u ON u.id = et.user_id
+			WHERE u.email = $1`, email).Scan(&storedHash, &userID, &purpose, &expiresAt, &usedAt)
+		if err != nil {
+			t.Fatalf("query email_tokens row: %v", err)
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(storedHash) {
+			t.Fatalf("stored token_hash = %q, want 64 lowercase hex chars", storedHash)
+		}
+		if storedHash != auth.HashToken(rawToken) || storedHash == rawToken || strings.Contains(storedHash, rawToken) {
+			t.Fatalf("stored token_hash = %q does not match SHA-256 of raw token", storedHash)
+		}
+		if purpose != mail.PurposeVerify || usedAt != nil || userID == 0 || expiresAt.IsZero() {
+			t.Fatalf("unexpected row metadata: purpose=%q usedAt=%v userID=%d expiresAt=%v", purpose, usedAt, userID, expiresAt)
+		}
+	})
+
+	t.Run("validation parity: reset checks password before token and verify separates JSON errors", func(t *testing.T) {
+		h := api.NewHandler(api.Config{
+			Pool:      pool,
+			AppOrigin: testOrigin,
+			Log:       slog.New(slog.NewJSONHandler(&syncBuffer{}, nil)),
+		})
+
+		resetRec := postJSON(t, h, "/api/auth/password/reset", `{"token":"bad","password":"short"}`)
+		if resetRec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("reset status = %d, want 422", resetRec.Code)
+		}
+		var resetProblem map[string]any
+		if err := json.Unmarshal(resetRec.Body.Bytes(), &resetProblem); err != nil {
+			t.Fatal(err)
+		}
+		if resetProblem["code"] != "weak_password" || resetProblem["field"] != "password" {
+			t.Fatalf("reset problem = %v, want code=weak_password field=password", resetProblem)
+		}
+
+		badJSON := postJSON(t, h, "/api/auth/verify-email", `{not-json`)
+		if badJSON.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("verify bad json status = %d, want 422", badJSON.Code)
+		}
+		var badJSONProblem map[string]any
+		if err := json.Unmarshal(badJSON.Body.Bytes(), &badJSONProblem); err != nil {
+			t.Fatal(err)
+		}
+		if badJSONProblem["code"] != "invalid_body" || badJSONProblem["field"] != nil {
+			t.Fatalf("verify bad json problem = %v, want code=invalid_body without field", badJSONProblem)
+		}
+
+		badTok := postJSON(t, h, "/api/auth/verify-email", `{"token":"bad"}`)
+		if badTok.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("verify bad token status = %d, want 422", badTok.Code)
+		}
+		var badTokProblem map[string]any
+		if err := json.Unmarshal(badTok.Body.Bytes(), &badTokProblem); err != nil {
+			t.Fatal(err)
+		}
+		if badTokProblem["code"] != "invalid_body" || badTokProblem["field"] != "token" {
+			t.Fatalf("verify bad token problem = %v, want code=invalid_body field=token", badTokProblem)
 		}
 	})
 }

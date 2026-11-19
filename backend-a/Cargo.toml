@@ -6,7 +6,7 @@ publish = false
 description = "pilot-shortlink backend A: Cloudflare Workers (Rust) + D1"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "password-hash"] }

@@ -20,6 +20,9 @@ DELETE FROM sessions WHERE token_hash = $1;
 -- name: DeleteUserSessions :exec
 DELETE FROM sessions WHERE user_id = $1;
 
+-- name: LockUser :one
+SELECT 1 FROM users WHERE id = $1 FOR UPDATE;
+
 -- name: DeleteUnusedEmailTokens :exec
 DELETE FROM email_tokens WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL;
 
@@ -28,7 +31,7 @@ INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES ($1, 
 
 -- name: ConsumeEmailToken :one
 -- Atomic single-statement consume: concurrent requests cannot both consume the same token (AC-V7).
-UPDATE email_tokens SET used_at = now() WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() RETURNING user_id;
+UPDATE email_tokens SET used_at = $3 WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > $3 RETURNING user_id;
 
 -- name: MarkEmailVerified :exec
 UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1;

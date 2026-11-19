@@ -10,7 +10,9 @@ export function VerifyEmailPage() {
   const { token, valid } = useEmailToken();
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string | null>(valid ? null : verifyEmailCopy.tokenInvalid);
+  const [error, setError] = useState<{ text: string; tokenInvalid?: boolean } | null>(
+    valid ? null : { text: verifyEmailCopy.tokenInvalid, tokenInvalid: true },
+  );
 
   async function verify() {
     if (!token || busy) return;
@@ -45,10 +47,10 @@ export function VerifyEmailPage() {
           <h1 className="mt-1 text-xl font-semibold">{verifyEmailCopy.title}</h1>
           {error && (
             <p role="alert" aria-live="polite" className="mt-6 text-sm text-error">
-              {error}
+              {error.text}
             </p>
           )}
-          {valid && !error ? (
+          {valid && !error?.tokenInvalid ? (
             <div className="mt-6">
               <button type="button" className="btn btn-primary w-full" disabled={busy} onClick={verify}>
                 {busy ? verifyEmailCopy.busy : verifyEmailCopy.submit}

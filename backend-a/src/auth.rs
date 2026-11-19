@@ -9,7 +9,7 @@ use crate::http::{
     json_response_with_headers, now_ms, now_sec, problem_field_response, problem_response,
     rate_limited_response, read_json_body,
 };
-use crate::mail::{send_purpose_mail, spawn_purpose_mail, EnvMailer, Mailer, TokenPurpose};
+use crate::mail::{spawn_purpose_mail, EnvMailer, TokenPurpose};
 use crate::session::{
     authenticate_session, clear_session_cookie_header, create_session, delete_session,
     extract_session_cookie, generate_session_token, hash_session_token, session_cookie_header,
@@ -39,6 +39,24 @@ pub const FORGOT_MAX_PER_HOUR: i64 = 3;
 /// Email token lifetime in seconds (30 minutes) and base64url character length (43 chars).
 pub const EMAIL_TOKEN_EXPIRY_SECS: i64 = 30 * 60;
 pub const EMAIL_TOKEN_LEN: usize = 43;
+
+/// SQL statements shared with `tests/schema.rs` so SQLite tests exercise the exact queries handlers run.
+pub const DELETE_UNUSED_EMAIL_TOKENS_SQL: &str =
+    "DELETE FROM email_tokens WHERE user_id = ?1 AND purpose = ?2 AND used_at IS NULL";
+pub const INSERT_EMAIL_TOKEN_SQL: &str =
+    "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES (?1, ?2, ?3, ?4)";
+pub const CONSUME_EMAIL_TOKEN_SQL: &str = "UPDATE email_tokens \
+    SET used_at = ?1 \
+    WHERE token_hash = ?2 \
+      AND purpose = ?3 \
+      AND used_at IS NULL \
+      AND expires_at > ?1 \
+    RETURNING user_id";
+
+/// Computes the Unix timestamp at which an email token issued at `now_sec` expires.
+pub fn email_token_expires_at(now_sec: i64) -> i64 {
+    now_sec + EMAIL_TOKEN_EXPIRY_SECS
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,20 +259,17 @@ pub async fn issue_email_token(
 ) -> Result<(String, String)> {
     let token = generate_email_token().map_err(Error::RustError)?;
     let token_hash = hash_email_token(&token);
-    let expires_at = now_sec + EMAIL_TOKEN_EXPIRY_SECS;
+    let expires_at = email_token_expires_at(now_sec);
 
     let del_stmt = db
-        .prepare("DELETE FROM email_tokens WHERE user_id = ?1 AND purpose = ?2 AND used_at IS NULL")
+        .prepare(DELETE_UNUSED_EMAIL_TOKENS_SQL)
         .bind(&[
             wasm_bindgen::JsValue::from_f64(user_id as f64),
             purpose.as_str().into(),
         ])?;
 
     let ins_stmt = db
-        .prepare(
-            "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) \
-             VALUES (?1, ?2, ?3, ?4)",
-        )
+        .prepare(INSERT_EMAIL_TOKEN_SQL)
         .bind(&[
             token_hash.as_str().into(),
             wasm_bindgen::JsValue::from_f64(user_id as f64),
@@ -277,15 +292,7 @@ pub async fn consume_email_token(
 ) -> Result<Option<i64>> {
     let token_hash = hash_email_token(raw_token);
     let row = db
-        .prepare(
-            "UPDATE email_tokens \
-             SET used_at = ?1 \
-             WHERE token_hash = ?2 \
-               AND purpose = ?3 \
-               AND used_at IS NULL \
-               AND expires_at > ?1 \
-             RETURNING user_id",
-        )
+        .prepare(CONSUME_EMAIL_TOKEN_SQL)
         .bind(&[
             wasm_bindgen::JsValue::from_f64(now_sec as f64),
             token_hash.as_str().into(),
@@ -295,101 +302,6 @@ pub async fn consume_email_token(
         .await?;
 
     Ok(row.map(|r| r.user_id))
-}
-
-/// Pure helper that builds the 201 registration response payload and invokes `mailer`.
-/// Even if `mailer` fails, registration succeeds with `emailVerified: false` and the session cookie.
-pub async fn complete_registration_with_mailer<M: Mailer>(
-    email: &str,
-    session_token: &str,
-    verify_token: &str,
-    verify_token_hash: &str,
-    app_origin: &str,
-    mailer: &M,
-) -> std::result::Result<(u16, String, String, String), String> {
-    let cookie = session_cookie_header(session_token);
-    let body = serde_json::to_string(&MeResponse {
-        email,
-        email_verified: false,
-    })
-    .map_err(|e| e.to_string())?;
-    let log_line = send_purpose_mail(
-        mailer,
-        TokenPurpose::Verify,
-        email,
-        app_origin,
-        verify_token,
-        verify_token_hash,
-    )
-    .await;
-    Ok((201, body, cookie, log_line))
-}
-
-/// Clock-injected in-memory token store mirroring the D1 `email_tokens` table invariants
-/// for deterministic unit testing of token expiry, single-use, purpose isolation, and rotation.
-#[derive(Debug, Default)]
-pub struct ClockEmailTokenStore {
-    rows: Vec<EmailTokenEntry>,
-}
-
-#[derive(Debug, Clone)]
-struct EmailTokenEntry {
-    token_hash: String,
-    user_id: i64,
-    purpose: TokenPurpose,
-    expires_at: i64,
-    used_at: Option<i64>,
-}
-
-impl ClockEmailTokenStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Issues a new token for `(user_id, purpose)` at `clock()`, deleting any prior unused tokens
-    /// for the same `(user_id, purpose)`.
-    pub fn issue(
-        &mut self,
-        user_id: i64,
-        purpose: TokenPurpose,
-        clock: impl FnOnce() -> i64,
-    ) -> std::result::Result<(String, String), String> {
-        let now = clock();
-        let token = generate_email_token()?;
-        let token_hash = hash_email_token(&token);
-        let expires_at = now + EMAIL_TOKEN_EXPIRY_SECS;
-
-        self.rows
-            .retain(|r| !(r.user_id == user_id && r.purpose == purpose && r.used_at.is_none()));
-        self.rows.push(EmailTokenEntry {
-            token_hash: token_hash.clone(),
-            user_id,
-            purpose,
-            expires_at,
-            used_at: None,
-        });
-        Ok((token, token_hash))
-    }
-
-    /// Consumes `raw_token` for `purpose` at `clock()`. Returns `Some(user_id)` only if the token
-    /// exists, matches `purpose`, has `used_at == None`, and has `expires_at > clock()`.
-    pub fn consume(
-        &mut self,
-        raw_token: &str,
-        purpose: TokenPurpose,
-        clock: impl FnOnce() -> i64,
-    ) -> Option<i64> {
-        let now = clock();
-        let token_hash = hash_email_token(raw_token);
-        let entry = self.rows.iter_mut().find(|r| {
-            r.token_hash == token_hash
-                && r.purpose == purpose
-                && r.used_at.is_none()
-                && r.expires_at > now
-        })?;
-        entry.used_at = Some(now);
-        Some(entry.user_id)
-    }
 }
 
 /// `POST /api/auth/register`
@@ -664,11 +576,11 @@ pub async fn handle_forgot_password(
     }
 
     let now = now_sec();
-    let (window_start, retry_after) = hourly_window(now);
+    let (window_start, _) = hourly_window(now);
     let rate_key = format!("forgot:{email}");
     let count = consume_rate_limit(db, &rate_key, window_start, now).await?;
     if count > FORGOT_MAX_PER_HOUR {
-        return rate_limited_response(retry_after);
+        return Ok(Response::empty()?.with_status(204));
     }
 
     let user = db
@@ -763,9 +675,8 @@ pub async fn handle_reset_password(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mail::MailSendError;
+    use crate::mail::{send_purpose_mail, MailSendError, Mailer};
     use argon2::password_hash::phc::PasswordHash;
-    use std::cell::Cell;
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
@@ -882,76 +793,28 @@ mod tests {
     }
 
     #[test]
-    fn token_expiry_with_injected_clock_rejects_expired_used_and_superseded_tokens() {
-        let now = Cell::new(1_700_000_000_i64);
-        let clock = || now.get();
-        let mut store = ClockEmailTokenStore::new();
-
-        // Issue a verify token at t0; expires at t0 + 1800 (30 minutes).
-        let (expired_token, _) = store
-            .issue(42, TokenPurpose::Verify, clock)
-            .expect("issue token");
-
-        // Advance injected clock to exact 30-minute boundary (t0 + 1800) and past it (t0 + 1801).
-        now.set(1_700_000_000 + EMAIL_TOKEN_EXPIRY_SECS);
-        assert_eq!(
-            store.consume(&expired_token, TokenPurpose::Verify, clock),
-            None,
-            "token at 30-minute expiry boundary must not be consumed"
-        );
-        now.set(1_700_000_000 + EMAIL_TOKEN_EXPIRY_SECS + 1);
-        assert_eq!(
-            store.consume(&expired_token, TokenPurpose::Verify, clock),
-            None,
-            "expired token after 30 minutes must not be consumed"
-        );
-
-        // Issue a new verify token at current clock; consume 1 second before expiry -> succeeds once.
-        let t1 = clock();
-        let (valid_token, _) = store
-            .issue(42, TokenPurpose::Verify, clock)
-            .expect("issue second token");
-        now.set(t1 + EMAIL_TOKEN_EXPIRY_SECS - 1);
-        assert_eq!(
-            store.consume(&valid_token, TokenPurpose::Verify, clock),
-            Some(42),
-            "unexpired token must be consumed once"
-        );
-        assert_eq!(
-            store.consume(&valid_token, TokenPurpose::Verify, clock),
-            None,
-            "already-used token must not be consumed a second time"
-        );
-
-        // Issuing a new token supersedes an unused earlier token of the same purpose.
-        let (first_reset, _) = store
-            .issue(42, TokenPurpose::Reset, clock)
-            .expect("issue first reset");
-        let (second_reset, _) = store
-            .issue(42, TokenPurpose::Reset, clock)
-            .expect("issue second reset");
-        assert_eq!(
-            store.consume(&first_reset, TokenPurpose::Reset, clock),
-            None,
-            "superseded token must be invalidated"
-        );
-        assert_eq!(
-            store.consume(&second_reset, TokenPurpose::Verify, clock),
-            None,
-            "reset token must not verify email"
-        );
-        assert_eq!(
-            store.consume(&second_reset, TokenPurpose::Reset, clock),
-            Some(42)
-        );
+    fn email_token_expiry_is_thirty_minutes() {
+        assert_eq!(EMAIL_TOKEN_EXPIRY_SECS, 1_800);
+        assert_eq!(email_token_expires_at(1_700_000_000), 1_700_001_800);
     }
 
     #[test]
-    fn failing_mailer_does_not_fail_registration_logic() {
+    fn failing_mailer_logs_without_leaking_and_register_payload_succeeds() {
         let email = "newuser@example.test";
         let session_tok = generate_session_token().expect("session token");
         let verify_tok = generate_email_token().expect("verify token");
         let verify_hash = hash_email_token(&verify_tok);
+
+        let cookie = session_cookie_header(&session_tok);
+        let body = serde_json::to_string(&MeResponse {
+            email,
+            email_verified: false,
+        })
+        .expect("serialize MeResponse");
+        assert!(cookie.starts_with("__Host-session="));
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(parsed["email"], email);
+        assert_eq!(parsed["emailVerified"], false);
 
         for err in [
             MailSendError::HttpStatus(500),
@@ -960,22 +823,14 @@ mod tests {
             MailSendError::Transport,
         ] {
             let mailer = FailingTestMailer(err);
-            let (status, body, cookie, log_line) =
-                block_on_ready(complete_registration_with_mailer(
-                    email,
-                    &session_tok,
-                    &verify_tok,
-                    &verify_hash,
-                    "http://localhost:8787",
-                    &mailer,
-                ))
-                .expect("registration must succeed even when mailer fails");
-
-            assert_eq!(status, 201);
-            assert!(cookie.starts_with("__Host-session="));
-            let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-            assert_eq!(parsed["email"], email);
-            assert_eq!(parsed["emailVerified"], false);
+            let log_line = block_on_ready(send_purpose_mail(
+                &mailer,
+                TokenPurpose::Verify,
+                email,
+                "http://localhost:8787",
+                &verify_tok,
+                &verify_hash,
+            ));
 
             assert!(!log_line.contains(&verify_tok));
             assert!(!log_line.contains(&verify_hash));
