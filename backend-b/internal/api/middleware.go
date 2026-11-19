@@ -13,8 +13,9 @@ type ctxKey struct{}
 
 // sessionUser is the logged-in user attached to the request by requireSession.
 type sessionUser struct {
-	ID    int64
-	Email string
+	ID            int64
+	Email         string
+	EmailVerified bool
 }
 
 func userFrom(r *http.Request) sessionUser { return r.Context().Value(ctxKey{}).(sessionUser) }
@@ -51,8 +52,19 @@ func (s *server) requireSession(next http.Handler) http.Handler {
 			s.fail(w, err)
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKey{}, sessionUser{ID: u.ID, Email: u.Email})
+		ctx := context.WithValue(r.Context(), ctxKey{}, sessionUser{ID: u.ID, Email: u.Email, EmailVerified: u.EmailVerified})
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// requireVerified answers 403 email_unverified for unverified users on link-mutating routes (AC-V4).
+func (s *server) requireVerified(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !userFrom(r).EmailVerified {
+			writeProblem(w, http.StatusForbidden, "email_unverified", "")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

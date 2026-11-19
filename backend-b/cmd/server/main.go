@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/api"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
 )
 
 func main() {
@@ -28,6 +29,10 @@ func run(log *slog.Logger) error {
 	if dbURL == "" || origin == "" {
 		return errors.New("DATABASE_URL and APP_ORIGIN are required")
 	}
+	// capture mode exposes every mailed token at GET /api/test/mail; Render always sets RENDER, so refuse it there.
+	if os.Getenv("MAIL_MODE") == "capture" && os.Getenv("RENDER") != "" {
+		return errors.New("MAIL_MODE=capture is not allowed on Render")
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -42,9 +47,10 @@ func run(log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	mailer, capture := mail.FromEnv()
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           api.NewHandler(api.Config{Pool: pool, AppOrigin: origin, Log: log}),
+		Handler:           api.NewHandler(api.Config{Pool: pool, AppOrigin: origin, Log: log, Mailer: mailer, Capture: capture}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,

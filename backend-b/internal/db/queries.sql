@@ -4,18 +4,37 @@
 INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id;
 
 -- name: GetUserByEmail :one
-SELECT id, password_hash FROM users WHERE email = $1;
+SELECT id, password_hash, (email_verified_at IS NOT NULL)::boolean AS email_verified FROM users WHERE email = $1;
 
 -- name: CreateSession :exec
 INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3);
 
 -- name: GetSessionUser :one
-SELECT u.id, u.email
+SELECT u.id, u.email, (u.email_verified_at IS NOT NULL)::boolean AS email_verified
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1 AND s.expires_at > now();
 
 -- name: DeleteSession :exec
 DELETE FROM sessions WHERE token_hash = $1;
+
+-- name: DeleteUserSessions :exec
+DELETE FROM sessions WHERE user_id = $1;
+
+-- name: DeleteUnusedEmailTokens :exec
+DELETE FROM email_tokens WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL;
+
+-- name: CreateEmailToken :exec
+INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES ($1, $2, $3, $4);
+
+-- name: ConsumeEmailToken :one
+-- Atomic single-statement consume: concurrent requests cannot both consume the same token (AC-V7).
+UPDATE email_tokens SET used_at = now() WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() RETURNING user_id;
+
+-- name: MarkEmailVerified :exec
+UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1;
+
+-- name: ResetUserPassword :exec
+UPDATE users SET password_hash = $2, email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1;
 
 -- name: GetRateCount :one
 SELECT count FROM rate_limits WHERE key = $1 AND window_start = $2;

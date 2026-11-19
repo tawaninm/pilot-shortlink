@@ -2,9 +2,12 @@ package db_test
 
 import (
 	"context"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/auth"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/testdb"
 )
@@ -44,6 +47,54 @@ func TestSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("AC-V9 email_tokens has token_hash and no plain token column", func(t *testing.T) {
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'email_tokens'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, c)
+			if lc := strings.ToLower(c); lc == "token" || (strings.Contains(lc, "token") && lc != "token_hash") {
+				t.Errorf("email_tokens must not have plain token column %q", c)
+			}
+		}
+		if !slices.Contains(got, "token_hash") || len(got) != 5 {
+			t.Fatalf("email_tokens columns = %v, want token_hash, user_id, purpose, expires_at, used_at", got)
+		}
+
+		var uid int64
+		mustScan(t, pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('tok@example.test','x') RETURNING id`), &uid)
+		tok, hash, err := auth.NewSessionToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES ($1, $2, 'verify', now() + interval '30 minutes')`, hash, uid); err != nil {
+			t.Fatal(err)
+		}
+		var stored string
+		mustScan(t, pool.QueryRow(ctx, `SELECT token_hash FROM email_tokens WHERE user_id = $1`, uid), &stored)
+		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(stored) || stored == tok || strings.Contains(stored, tok) {
+			t.Fatalf("stored token_hash = %q (len %d), want 64 hex chars without raw token", stored, len(stored))
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES ('other', $1, 'bad', now())`, uid); err == nil {
+			t.Fatal("invalid purpose was accepted")
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, uid); err != nil {
+			t.Fatal(err)
+		}
+		var left int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM email_tokens WHERE user_id = $1`, uid), &left)
+		if left != 0 {
+			t.Fatalf("email_tokens left after user delete cascade: %d", left)
+		}
+	})
+
 	t.Run("deleting a user removes their links and clicks", func(t *testing.T) {
 		var uid, lid int64
 		mustScan(t, pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('a@example.test','x') RETURNING id`), &uid)
@@ -71,8 +122,15 @@ func TestSchema(t *testing.T) {
 		if err := db.Migrate(ctx, pool, "down"); err != nil {
 			t.Fatalf("down: %v", err)
 		}
+		var uid int64
+		mustScan(t, pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('legacy@example.test','x') RETURNING id`), &uid)
 		if err := db.Migrate(ctx, pool, "up"); err != nil {
 			t.Fatalf("up again: %v", err)
+		}
+		var verified bool
+		mustScan(t, pool.QueryRow(ctx, `SELECT email_verified_at = created_at FROM users WHERE id = $1`, uid), &verified)
+		if !verified {
+			t.Fatal("existing user was not marked verified by 00002 migration")
 		}
 	})
 }

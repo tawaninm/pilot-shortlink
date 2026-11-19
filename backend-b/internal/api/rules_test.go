@@ -40,6 +40,9 @@ func TestCheckAlias(t *testing.T) {
 		strings.Repeat("x", 33): {strings.Repeat("x", 33), "invalid_alias"},
 		"API":                   {"api", "reserved_alias"},
 		"Health":                {"health", "reserved_alias"},
+		"verify-email":          {"verify-email", "reserved_alias"},
+		"Forgot-Password":       {"forgot-password", "reserved_alias"},
+		"Reset-Password":        {"reset-password", "reserved_alias"},
 		"Kelvin":                {"Kelvin", "invalid_alias"},
 	}
 	for in, want := range cases {

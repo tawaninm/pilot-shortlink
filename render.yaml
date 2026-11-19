@@ -29,3 +29,7 @@ services:
         sync: false # [TBC] Paste Neon pooled connection string (?sslmode=require) in Render Dashboard
       - key: APP_ORIGIN
         sync: false # [TBC] Set to https://pilot-shortlink-b.<SUBDOMAIN>.onrender.com (or actual Render URL, no trailing slash)
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
