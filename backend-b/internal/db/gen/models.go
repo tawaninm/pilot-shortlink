@@ -6,6 +6,8 @@ package gen
 
 import (
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type ClickDaily struct {
@@ -13,6 +15,14 @@ type ClickDaily struct {
 	Day          time.Time
 	ReferrerHost string
 	Clicks       int64
+}
+
+type EmailToken struct {
+	TokenHash string
+	UserID    int64
+	Purpose   string
+	ExpiresAt time.Time
+	UsedAt    pgtype.Timestamptz
 }
 
 type Link struct {
@@ -36,8 +46,9 @@ type Session struct {
 }
 
 type User struct {
-	ID           int64
-	Email        string
-	PasswordHash string
-	CreatedAt    time.Time
+	ID              int64
+	Email           string
+	PasswordHash    string
+	CreatedAt       time.Time
+	EmailVerifiedAt pgtype.Timestamptz
 }

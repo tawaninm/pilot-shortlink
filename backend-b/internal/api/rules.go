@@ -16,6 +16,7 @@ var (
 	reserved     = map[string]bool{
 		"api": true, "app": true, "admin": true, "login": true, "logout": true, "register": true,
 		"static": true, "assets": true, "health": true, "openapi": true,
+		"verify-email": true, "forgot-password": true, "reset-password": true,
 	}
 )
 

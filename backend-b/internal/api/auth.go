@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"net/mail"
+	netmail "net/mail"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,15 +17,22 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/auth"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
 )
 
 const (
-	sessionCookie  = "__Host-session" // __Host-: HTTPS only, Path=/, no Domain (S7 security review)
-	sessionTTL     = 7 * 24 * time.Hour
-	loginWindow    = 15 * time.Minute
-	loginMaxFailed = 5
-	maxBodyBytes   = 16 << 10
+	sessionCookie   = "__Host-session" // __Host-: HTTPS only, Path=/, no Domain (S7 security review)
+	sessionTTL      = 7 * 24 * time.Hour
+	emailTokenTTL   = 30 * time.Minute
+	mailSendTimeout = 10 * time.Second
+	mailRateWindow  = time.Hour
+	mailRateMax     = 3
+	loginWindow     = 15 * time.Minute
+	loginMaxFailed  = 5
+	maxBodyBytes    = 16 << 10
 )
+
+var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 // errBadBody means the body was not one valid JSON object of the expected shape.
 var errBadBody = errors.New("invalid body")
@@ -40,6 +50,19 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	return nil
 }
 
+type meResponse struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"emailVerified"`
+}
+
+func parseEmail(raw string) (string, bool) {
+	email := strings.ToLower(strings.TrimSpace(raw))
+	if addr, err := netmail.ParseAddress(email); err != nil || addr.Address != email || len(email) > 254 {
+		return "", false
+	}
+	return email, true
+}
+
 type credentials struct {
 	Email    *string `json:"email"`
 	Password *string `json:"password"`
@@ -51,8 +74,8 @@ func (c credentials) parse(w http.ResponseWriter) (email, password string, ok bo
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
 		return "", "", false
 	}
-	email = strings.ToLower(strings.TrimSpace(*c.Email))
-	if addr, err := mail.ParseAddress(email); err != nil || addr.Address != email || len(email) > 254 {
+	email, ok = parseEmail(*c.Email)
+	if !ok {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "email")
 		return "", "", false
 	}
@@ -73,6 +96,54 @@ func (s *server) setSession(w http.ResponseWriter, r *http.Request, userID int64
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 	return nil
+}
+
+// issueEmailToken replaces any unused token for (userID, purpose) with a fresh 32-byte token (stored as SHA-256 hex).
+func (s *server) issueEmailToken(ctx context.Context, userID int64, purpose string) (token, hash string, err error) {
+	token, hash, err = auth.NewSessionToken()
+	if err != nil {
+		return "", "", err
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.DeleteUnusedEmailTokens(ctx, gen.DeleteUnusedEmailTokensParams{UserID: userID, Purpose: purpose}); err != nil {
+		return "", "", err
+	}
+	if err := qtx.CreateEmailToken(ctx, gen.CreateEmailTokenParams{
+		TokenHash: hash,
+		UserID:    userID,
+		Purpose:   purpose,
+		ExpiresAt: s.Now().Add(emailTokenTTL),
+	}); err != nil {
+		return "", "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	return token, hash, nil
+}
+
+// sendMailAsync dispatches an email in the background with a 10 s timeout detached from request cancellation.
+// Logs contain only the purpose — never the token, link, email or password (A09).
+func (s *server) sendMailAsync(reqCtx context.Context, purpose string, msg mail.Mail) {
+	if s.Mailer == nil {
+		return
+	}
+	baseCtx := context.WithoutCancel(reqCtx)
+	go func() {
+		ctx, cancel := context.WithTimeout(baseCtx, mailSendTimeout)
+		defer cancel()
+		if err := s.Mailer.Send(ctx, msg); err != nil {
+			s.Log.Error("mail_failed", "purpose", purpose, "error", err.Error()) // adapter errors carry only a status, never token, link or address
+			return
+		}
+		s.Log.Info("mail_sent", "purpose", purpose)
+	}()
 }
 
 // hashSlots caps concurrent Argon2 runs. Each takes about 19 MiB, so a burst of logins or sign-ups
@@ -122,7 +193,12 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"email": email})
+	if token, tokenHash, err := s.issueEmailToken(r.Context(), id, mail.PurposeVerify); err != nil {
+		s.Log.Error("mail_failed", "purpose", mail.PurposeVerify)
+	} else {
+		s.sendMailAsync(r.Context(), mail.PurposeVerify, mail.Build(mail.PurposeVerify, email, s.AppOrigin, token, tokenHash))
+	}
+	writeJSON(w, http.StatusCreated, meResponse{Email: email, EmailVerified: false})
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +254,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"email": email})
+	writeJSON(w, http.StatusOK, meResponse{Email: email, EmailVerified: user.EmailVerified})
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +270,191 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) me(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"email": userFrom(r).Email})
+	u := userFrom(r)
+	writeJSON(w, http.StatusOK, meResponse{Email: u.Email, EmailVerified: u.EmailVerified})
+}
+
+type tokenBody struct {
+	Token *string `json:"token"`
+}
+
+func (s *server) verifyEmail(w http.ResponseWriter, r *http.Request) {
+	var body tokenBody
+	if readJSON(w, r, &body) != nil || body.Token == nil || !tokenPattern.MatchString(*body.Token) {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "token")
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := s.q.WithTx(tx)
+
+	userID, err := qtx.ConsumeEmailToken(ctx, gen.ConsumeEmailTokenParams{
+		TokenHash: auth.HashToken(*body.Token),
+		Purpose:   mail.PurposeVerify,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeProblem(w, http.StatusBadRequest, "token_invalid", "")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := qtx.MarkEmailVerified(ctx, userID); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) resendVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	user, ctx := userFrom(r), r.Context()
+	if user.EmailVerified {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	window := s.Now().Truncate(mailRateWindow)
+	n, err := s.q.BumpRate(ctx, gen.BumpRateParams{
+		Key:         "resend:" + strconv.FormatInt(user.ID, 10),
+		WindowStart: window,
+	})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if n > mailRateMax {
+		writeRateLimited(w, int(window.Add(mailRateWindow).Sub(s.Now()).Seconds()))
+		return
+	}
+	token, tokenHash, err := s.issueEmailToken(ctx, user.ID, mail.PurposeVerify)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.sendMailAsync(ctx, mail.PurposeVerify, mail.Build(mail.PurposeVerify, user.Email, s.AppOrigin, token, tokenHash))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type forgotBody struct {
+	Email *string `json:"email"`
+}
+
+func (s *server) forgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body forgotBody
+	if readJSON(w, r, &body) != nil || body.Email == nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
+		return
+	}
+	email, ok := parseEmail(*body.Email)
+	if !ok {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "email")
+		return
+	}
+	ctx := r.Context()
+	window := s.Now().Truncate(mailRateWindow)
+	n, err := s.q.BumpRate(ctx, gen.BumpRateParams{
+		Key:         "forgot:" + email,
+		WindowStart: window,
+	})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if n > mailRateMax {
+		writeRateLimited(w, int(window.Add(mailRateWindow).Sub(s.Now()).Seconds()))
+		return
+	}
+	user, err := s.q.GetUserByEmail(ctx, email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	token, tokenHash, err := s.issueEmailToken(ctx, user.ID, mail.PurposeReset)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.sendMailAsync(ctx, mail.PurposeReset, mail.Build(mail.PurposeReset, email, s.AppOrigin, token, tokenHash))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type resetBody struct {
+	Token    *string `json:"token"`
+	Password *string `json:"password"`
+}
+
+func (s *server) resetPassword(w http.ResponseWriter, r *http.Request) {
+	var body resetBody
+	if readJSON(w, r, &body) != nil || body.Token == nil || body.Password == nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "")
+		return
+	}
+	if !tokenPattern.MatchString(*body.Token) {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_body", "token")
+		return
+	}
+	if n := utf8.RuneCountInString(*body.Password); n < 10 || n > 128 {
+		writeProblem(w, http.StatusUnprocessableEntity, "weak_password", "password")
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := s.q.WithTx(tx)
+
+	userID, err := qtx.ConsumeEmailToken(ctx, gen.ConsumeEmailTokenParams{
+		TokenHash: auth.HashToken(*body.Token),
+		Purpose:   mail.PurposeReset,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeProblem(w, http.StatusBadRequest, "token_invalid", "")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	var hash string
+	s.hashTimed("reset", func() { hash, err = auth.HashPassword(*body.Password) })
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := qtx.ResetUserPassword(ctx, gen.ResetUserPasswordParams{ID: userID, PasswordHash: hash}); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := qtx.DeleteUserSessions(ctx, userID); err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) testMail(w http.ResponseWriter, r *http.Request) {
+	to := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("to")))
+	writeJSON(w, http.StatusOK, map[string]any{"items": s.Capture.For(to)})
 }
 
 func isUniqueViolation(err error) bool {

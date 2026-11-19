@@ -29,6 +29,23 @@ func (q *Queries) BumpRate(ctx context.Context, arg BumpRateParams) (int32, erro
 	return count, err
 }
 
+const consumeEmailToken = `-- name: ConsumeEmailToken :one
+UPDATE email_tokens SET used_at = now() WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > now() RETURNING user_id
+`
+
+type ConsumeEmailTokenParams struct {
+	TokenHash string
+	Purpose   string
+}
+
+// Atomic single-statement consume: concurrent requests cannot both consume the same token (AC-V7).
+func (q *Queries) ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (int64, error) {
+	row := q.db.QueryRow(ctx, consumeEmailToken, arg.TokenHash, arg.Purpose)
+	var user_id int64
+	err := row.Scan(&user_id)
+	return user_id, err
+}
+
 const countClick = `-- name: CountClick :exec
 INSERT INTO click_daily (link_id, day, referrer_host, clicks) VALUES ($1, $2, $3, 1)
 ON CONFLICT (link_id, day, referrer_host) DO UPDATE SET clicks = click_daily.clicks + 1
@@ -43,6 +60,27 @@ type CountClickParams struct {
 // One atomic statement per click: concurrent visits never lose a count.
 func (q *Queries) CountClick(ctx context.Context, arg CountClickParams) error {
 	_, err := q.db.Exec(ctx, countClick, arg.LinkID, arg.Day, arg.ReferrerHost)
+	return err
+}
+
+const createEmailToken = `-- name: CreateEmailToken :exec
+INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at) VALUES ($1, $2, $3, $4)
+`
+
+type CreateEmailTokenParams struct {
+	TokenHash string
+	UserID    int64
+	Purpose   string
+	ExpiresAt time.Time
+}
+
+func (q *Queries) CreateEmailToken(ctx context.Context, arg CreateEmailTokenParams) error {
+	_, err := q.db.Exec(ctx, createEmailToken,
+		arg.TokenHash,
+		arg.UserID,
+		arg.Purpose,
+		arg.ExpiresAt,
+	)
 	return err
 }
 
@@ -182,6 +220,29 @@ func (q *Queries) DeleteSession(ctx context.Context, tokenHash string) error {
 	return err
 }
 
+const deleteUnusedEmailTokens = `-- name: DeleteUnusedEmailTokens :exec
+DELETE FROM email_tokens WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL
+`
+
+type DeleteUnusedEmailTokensParams struct {
+	UserID  int64
+	Purpose string
+}
+
+func (q *Queries) DeleteUnusedEmailTokens(ctx context.Context, arg DeleteUnusedEmailTokensParams) error {
+	_, err := q.db.Exec(ctx, deleteUnusedEmailTokens, arg.UserID, arg.Purpose)
+	return err
+}
+
+const deleteUserSessions = `-- name: DeleteUserSessions :exec
+DELETE FROM sessions WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
+	_, err := q.db.Exec(ctx, deleteUserSessions, userID)
+	return err
+}
+
 const getLinkTarget = `-- name: GetLinkTarget :one
 SELECT id, url FROM links WHERE code = $1
 `
@@ -243,36 +304,38 @@ func (q *Queries) GetRateCount(ctx context.Context, arg GetRateCountParams) (int
 }
 
 const getSessionUser = `-- name: GetSessionUser :one
-SELECT u.id, u.email
+SELECT u.id, u.email, (u.email_verified_at IS NOT NULL)::boolean AS email_verified
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1 AND s.expires_at > now()
 `
 
 type GetSessionUserRow struct {
-	ID    int64
-	Email string
+	ID            int64
+	Email         string
+	EmailVerified bool
 }
 
 func (q *Queries) GetSessionUser(ctx context.Context, tokenHash string) (GetSessionUserRow, error) {
 	row := q.db.QueryRow(ctx, getSessionUser, tokenHash)
 	var i GetSessionUserRow
-	err := row.Scan(&i.ID, &i.Email)
+	err := row.Scan(&i.ID, &i.Email, &i.EmailVerified)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, password_hash FROM users WHERE email = $1
+SELECT id, password_hash, (email_verified_at IS NOT NULL)::boolean AS email_verified FROM users WHERE email = $1
 `
 
 type GetUserByEmailRow struct {
-	ID           int64
-	PasswordHash string
+	ID            int64
+	PasswordHash  string
+	EmailVerified bool
 }
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEmailRow, error) {
 	row := q.db.QueryRow(ctx, getUserByEmail, email)
 	var i GetUserByEmailRow
-	err := row.Scan(&i.ID, &i.PasswordHash)
+	err := row.Scan(&i.ID, &i.PasswordHash, &i.EmailVerified)
 	return i, err
 }
 
@@ -398,6 +461,15 @@ func (q *Queries) ListLinks(ctx context.Context, userID int64) ([]ListLinksRow, 
 	return items, nil
 }
 
+const markEmailVerified = `-- name: MarkEmailVerified :exec
+UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1
+`
+
+func (q *Queries) MarkEmailVerified(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, markEmailVerified, id)
+	return err
+}
+
 const resetRate = `-- name: ResetRate :exec
 DELETE FROM rate_limits WHERE key = $1
 `
@@ -405,6 +477,20 @@ DELETE FROM rate_limits WHERE key = $1
 // A successful login clears the failure count for that email (the limit counts guesses, not users).
 func (q *Queries) ResetRate(ctx context.Context, key string) error {
 	_, err := q.db.Exec(ctx, resetRate, key)
+	return err
+}
+
+const resetUserPassword = `-- name: ResetUserPassword :exec
+UPDATE users SET password_hash = $2, email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1
+`
+
+type ResetUserPasswordParams struct {
+	ID           int64
+	PasswordHash string
+}
+
+func (q *Queries) ResetUserPassword(ctx context.Context, arg ResetUserPasswordParams) error {
+	_, err := q.db.Exec(ctx, resetUserPassword, arg.ID, arg.PasswordHash)
 	return err
 }
 

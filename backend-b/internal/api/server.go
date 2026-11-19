@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/site"
 )
 
@@ -19,6 +20,8 @@ type Config struct {
 	AppOrigin string // e.g. https://pilot-shortlink-b.onrender.com, used for the Origin check and self_link
 	Log       *slog.Logger
 	Now       func() time.Time // injectable clock for tests; nil means time.Now
+	Mailer    mail.Mailer      // outbound email port
+	Capture   *mail.Capture    // non-nil only when MAIL_MODE == "capture"; registers GET /api/test/mail
 }
 
 type server struct {
@@ -31,6 +34,17 @@ func NewHandler(cfg Config) http.Handler {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
+	if cfg.Capture == nil {
+		if c, ok := cfg.Mailer.(*mail.Capture); ok {
+			cfg.Capture = c
+		}
+	}
+	if cfg.Mailer == nil && cfg.Capture != nil {
+		cfg.Mailer = cfg.Capture
+	}
 	s := &server{Config: cfg, q: gen.New(cfg.Pool)}
 	r := chi.NewRouter()
 	r.Use(s.logRequests, s.recoverPanics, noSniff)
@@ -41,6 +55,9 @@ func NewHandler(cfg Config) http.Handler {
 	r.Get("/", app.Index)
 	r.Get("/login", app.Index)
 	r.Get("/register", app.Index)
+	r.Get("/verify-email", app.Index)
+	r.Get("/forgot-password", app.Index)
+	r.Get("/reset-password", app.Index)
 	r.Handle("/assets/*", app.Assets())
 
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -52,14 +69,24 @@ func NewHandler(cfg Config) http.Handler {
 		r.Post("/auth/register", s.register)
 		r.Post("/auth/login", s.login)
 		r.Post("/auth/logout", s.logout)
+		r.Post("/auth/verify-email", s.verifyEmail)
+		r.Post("/auth/password/forgot", s.forgotPassword)
+		r.Post("/auth/password/reset", s.resetPassword)
+		if s.Capture != nil {
+			r.Get("/test/mail", s.testMail)
+		}
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireSession)
 			r.Get("/me", s.me)
+			r.Post("/auth/verify-email/resend", s.resendVerifyEmail)
 			r.Get("/links", s.listLinks)
-			r.Post("/links", s.createLink)
-			r.Patch("/links/{code}", s.patchLink)
-			r.Delete("/links/{code}", s.deleteLink)
 			r.Get("/links/{code}/stats", s.linkStats)
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireVerified)
+				r.Post("/links", s.createLink)
+				r.Patch("/links/{code}", s.patchLink)
+				r.Delete("/links/{code}", s.deleteLink)
+			})
 		})
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeProblem(w, http.StatusNotFound, "not_found", "") })
 	})
