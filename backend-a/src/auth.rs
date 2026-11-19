@@ -596,6 +596,49 @@ pub async fn handle_resend_verify_email(
     Ok(Response::empty()?.with_status(204))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgotPasswordDecision {
+    InvalidBody,
+    CaptchaFailed,
+    InvalidEmail,
+    OverQuota,
+    Proceed,
+}
+
+/// Evaluates `POST /api/auth/password/forgot` gates in strict I9/AC-T4 order:
+/// JSON shape (422) -> captcha (403 captcha_failed) -> email format (422) -> per-email counter (204).
+pub async fn evaluate_forgot_password_gates<C, Q, Fut>(
+    raw_body: &[u8],
+    captcha: &C,
+    remote_ip: Option<&str>,
+    consume_quota: Q,
+) -> Result<(ForgotPasswordDecision, Option<String>)>
+where
+    C: CaptchaVerifier,
+    Q: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<i64>>,
+{
+    let Ok(payload) = serde_json::from_slice::<ForgotPasswordBody>(raw_body) else {
+        return Ok((ForgotPasswordDecision::InvalidBody, None));
+    };
+
+    if !captcha.verify(payload.captcha.as_deref(), remote_ip).await {
+        return Ok((ForgotPasswordDecision::CaptchaFailed, None));
+    }
+
+    let email = normalize_email(&payload.email);
+    if !is_valid_email(&email) {
+        return Ok((ForgotPasswordDecision::InvalidEmail, None));
+    }
+
+    let count = consume_quota(email.clone()).await?;
+    if count > FORGOT_MAX_PER_HOUR {
+        return Ok((ForgotPasswordDecision::OverQuota, None));
+    }
+
+    Ok((ForgotPasswordDecision::Proceed, Some(email)))
+}
+
 /// `POST /api/auth/password/forgot`
 pub async fn handle_forgot_password(
     req: &mut Request,
@@ -609,36 +652,34 @@ pub async fn handle_forgot_password(
         Ok(bytes) => bytes,
         Err(res) => return Ok(res),
     };
-    let Ok(payload) = serde_json::from_slice::<ForgotPasswordBody>(&raw_body) else {
-        return problem_response(422, "Unprocessable Entity", "invalid_body");
-    };
-
-    let email = normalize_email(&payload.email);
+    let remote_ip = client_ip(req);
     let now = now_sec();
-    let email_valid = is_valid_email(&email);
+    let (window_start, _) = hourly_window(now);
 
-    // Count the request against the per-email rate limit BEFORE verifying captcha (I9),
-    // so attackers cannot bypass rate limits or trigger free Turnstile checks.
-    if email_valid {
-        let (window_start, _) = hourly_window(now);
-        let rate_key = format!("forgot:{email}");
-        let count = consume_rate_limit(db, &rate_key, window_start, now).await?;
-        if count > FORGOT_MAX_PER_HOUR {
+    let (decision, maybe_email) =
+        evaluate_forgot_password_gates(&raw_body, captcha, remote_ip.as_deref(), |email| async move {
+            let rate_key = format!("forgot:{email}");
+            consume_rate_limit(db, &rate_key, window_start, now).await
+        })
+        .await?;
+
+    let email = match decision {
+        ForgotPasswordDecision::InvalidBody => {
+            return problem_response(422, "Unprocessable Entity", "invalid_body");
+        }
+        ForgotPasswordDecision::CaptchaFailed => {
+            return problem_response(403, "Forbidden", "captcha_failed");
+        }
+        ForgotPasswordDecision::InvalidEmail => {
+            return problem_field_response(422, "Unprocessable Entity", "invalid_body", "email");
+        }
+        ForgotPasswordDecision::OverQuota => {
             return Ok(Response::empty()?.with_status(204));
         }
-    }
-
-    let remote_ip = client_ip(req);
-    if !captcha
-        .verify(payload.captcha.as_deref(), remote_ip.as_deref())
-        .await
-    {
-        return problem_response(403, "Forbidden", "captcha_failed");
-    }
-
-    if !email_valid {
-        return problem_field_response(422, "Unprocessable Entity", "invalid_body", "email");
-    }
+        ForgotPasswordDecision::Proceed => {
+            maybe_email.ok_or_else(|| Error::RustError("missing email".to_string()))?
+        }
+    };
 
     let user = db
         .prepare("SELECT id FROM users WHERE email = ?1")
@@ -939,5 +980,106 @@ mod tests {
             assert!(!log_line.contains(email));
             assert!(log_line.contains(r#""result":"failed""#));
         }
+    }
+
+    #[test]
+    fn forgot_password_gates_verify_captcha_before_counting_per_email_quota() {
+        use crate::captcha::FakeCaptchaVerifier;
+        use std::cell::Cell;
+
+        let verifier = FakeCaptchaVerifier;
+
+        // 1. Malformed JSON (unknown field) fails before captcha or quota counter.
+        let quota_calls = Cell::new(0_i64);
+        let res = block_on_ready(evaluate_forgot_password_gates(
+            br#"{"email":"alice@example.test","captcha":"nope","extra":1}"#,
+            &verifier,
+            None,
+            |_| {
+                quota_calls.set(quota_calls.get() + 1);
+                async { Ok(1) }
+            },
+        ))
+        .expect("gate eval");
+        assert_eq!(res, (ForgotPasswordDecision::InvalidBody, None));
+        assert_eq!(quota_calls.get(), 0);
+
+        // 2. Wrong or missing captcha fails with CaptchaFailed WITHOUT touching per-email quota (AC-T4, I9).
+        for body in [
+            br#"{"email":"alice@example.test"}"#.as_slice(),
+            br#"{"email":"alice@example.test","captcha":"nope"}"#.as_slice(),
+            br#"{"email":"not-an-email","captcha":"nope"}"#.as_slice(),
+        ] {
+            let calls = Cell::new(0_i64);
+            let res = block_on_ready(evaluate_forgot_password_gates(
+                body,
+                &verifier,
+                None,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    async { Ok(1) }
+                },
+            ))
+            .expect("gate eval");
+            assert_eq!(res, (ForgotPasswordDecision::CaptchaFailed, None));
+            assert_eq!(
+                calls.get(),
+                0,
+                "failed captcha must never increment per-email quota"
+            );
+        }
+
+        // 3. Valid captcha + invalid email fails with InvalidEmail WITHOUT touching quota.
+        let calls = Cell::new(0_i64);
+        let res = block_on_ready(evaluate_forgot_password_gates(
+            br#"{"email":"not-an-email","captcha":"fake-pass"}"#,
+            &verifier,
+            None,
+            |_| {
+                calls.set(calls.get() + 1);
+                async { Ok(1) }
+            },
+        ))
+        .expect("gate eval");
+        assert_eq!(res, (ForgotPasswordDecision::InvalidEmail, None));
+        assert_eq!(calls.get(), 0);
+
+        // 4. Valid captcha + valid email over quota returns OverQuota (silent 204).
+        let calls = Cell::new(0_i64);
+        let res = block_on_ready(evaluate_forgot_password_gates(
+            br#"{"email":"  Alice@Example.TEST ","captcha":"fake-pass"}"#,
+            &verifier,
+            None,
+            |email| {
+                assert_eq!(email, "alice@example.test");
+                calls.set(calls.get() + 1);
+                async { Ok(FORGOT_MAX_PER_HOUR + 1) }
+            },
+        ))
+        .expect("gate eval");
+        assert_eq!(res, (ForgotPasswordDecision::OverQuota, None));
+        assert_eq!(calls.get(), 1);
+
+        // 5. Valid captcha + valid email within quota proceeds with normalized email.
+        let calls = Cell::new(0_i64);
+        let res = block_on_ready(evaluate_forgot_password_gates(
+            br#"{"email":"  Alice@Example.TEST ","captcha":"fake-pass"}"#,
+            &verifier,
+            None,
+            |email| {
+                assert_eq!(email, "alice@example.test");
+                calls.set(calls.get() + 1);
+                async { Ok(FORGOT_MAX_PER_HOUR) }
+            },
+        ))
+        .expect("gate eval");
+        assert_eq!(
+            res,
+            (
+                ForgotPasswordDecision::Proceed,
+                Some("alice@example.test".to_string())
+            )
+        );
+        assert_eq!(calls.get(), 1);
     }
 }

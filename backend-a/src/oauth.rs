@@ -6,7 +6,10 @@ use worker::*;
 use crate::auth::{
     consume_rate_limit, is_valid_email, normalize_email, OAUTH_ONLY_PASSWORD_HASH,
 };
-use crate::http::{client_ip, encode_form_urlencoded, now_sec, read_env_string};
+use crate::http::{
+    client_ip, encode_form_urlencoded, fetch_text_with_timeout, now_sec, read_env_string,
+    OUTBOUND_FETCH_TIMEOUT,
+};
 use crate::mail::is_local_origin;
 use crate::session::{
     create_session, generate_session_token, hash_session_token, session_cookie_header,
@@ -48,6 +51,22 @@ pub const INSERT_OAUTH_STATE_SQL: &str =
 pub const CONSUME_OAUTH_STATE_SQL: &str = "DELETE FROM oauth_states \
     WHERE state_hash = ?1 AND provider = ?2 AND expires_at > ?3 \
     RETURNING verifier";
+pub const INSERT_OAUTH_ACCOUNT_SQL: &str = "INSERT INTO oauth_accounts (provider, subject, user_id, created_at) \
+    VALUES (?1, ?2, ?3, ?4) \
+    ON CONFLICT(provider, subject) DO NOTHING";
+pub const SELECT_OAUTH_ACCOUNT_USER_SQL: &str =
+    "SELECT user_id FROM oauth_accounts WHERE provider = ?1 AND subject = ?2";
+pub const WIPE_UNVERIFIED_USER_SESSIONS_SQL: &str = "DELETE FROM sessions \
+    WHERE user_id = ?1 \
+      AND EXISTS (SELECT 1 FROM users WHERE id = ?1 AND email_verified_at IS NULL)";
+pub const WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL: &str = "DELETE FROM email_tokens \
+    WHERE user_id = ?1 \
+      AND used_at IS NULL \
+      AND EXISTS (SELECT 1 FROM users WHERE id = ?1 AND email_verified_at IS NULL)";
+pub const CLAIM_UNVERIFIED_USER_SQL: &str = "UPDATE users \
+    SET password_hash = ?1, \
+        email_verified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+    WHERE id = ?2 AND email_verified_at IS NULL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -385,6 +404,12 @@ struct UserIdRow {
     id: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct UserEmailRow {
+    id: i64,
+    email_verified_at: Option<String>,
+}
+
 /// Selects the sole usable GitHub email: `primary == true && verified == true` (AC-O2, I1).
 /// Returns the trimmed, lower-cased email if valid, or `None` if no primary verified email exists.
 pub fn select_github_primary_verified_email(emails: &[GithubEmail]) -> Option<String> {
@@ -444,15 +469,7 @@ async fn exchange_code(
 
     let req = Request::new_with_init(&config.token_url, &init)
         .map_err(|_| OAuthFailureReason::TokenExchangeFailed)?;
-    let mut res = Fetch::Request(req)
-        .send()
-        .await
-        .map_err(|_| OAuthFailureReason::TokenExchangeFailed)?;
-    if !(200..300).contains(&res.status_code()) {
-        return Err(OAuthFailureReason::TokenExchangeFailed);
-    }
-    let text = res
-        .text()
+    let text = fetch_text_with_timeout(req, OUTBOUND_FETCH_TIMEOUT)
         .await
         .map_err(|_| OAuthFailureReason::TokenExchangeFailed)?;
     let parsed: TokenResponse =
@@ -490,14 +507,7 @@ async fn fetch_json_bearer(
 
     let req = Request::new_with_init(url, &init)
         .map_err(|_| OAuthFailureReason::IdentityFetchFailed)?;
-    let mut res = Fetch::Request(req)
-        .send()
-        .await
-        .map_err(|_| OAuthFailureReason::IdentityFetchFailed)?;
-    if !(200..300).contains(&res.status_code()) {
-        return Err(OAuthFailureReason::IdentityFetchFailed);
-    }
-    res.text()
+    fetch_text_with_timeout(req, OUTBOUND_FETCH_TIMEOUT)
         .await
         .map_err(|_| OAuthFailureReason::IdentityFetchFailed)
 }
@@ -551,6 +561,56 @@ async fn fetch_identity(
     }
 }
 
+async fn link_existing_user(
+    db: &D1Database,
+    provider: Provider,
+    subject: &str,
+    user: &UserEmailRow,
+    now: i64,
+) -> std::result::Result<(), OAuthFailureReason> {
+    let link_stmt = db
+        .prepare(INSERT_OAUTH_ACCOUNT_SQL)
+        .bind(&[
+            provider.as_str().into(),
+            subject.into(),
+            wasm_bindgen::JsValue::from_f64(user.id as f64),
+            wasm_bindgen::JsValue::from_f64(now as f64),
+        ])
+        .map_err(|_| OAuthFailureReason::AccountError)?;
+
+    if user.email_verified_at.is_none() {
+        // Pre-hijack defense (I10, AC-O12): when linking to an unverified password account,
+        // wipe its password, active sessions, and unused email tokens in the same batch.
+        let wipe_sessions = db
+            .prepare(WIPE_UNVERIFIED_USER_SESSIONS_SQL)
+            .bind(&[wasm_bindgen::JsValue::from_f64(user.id as f64)])
+            .map_err(|_| OAuthFailureReason::AccountError)?;
+        let wipe_tokens = db
+            .prepare(WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL)
+            .bind(&[wasm_bindgen::JsValue::from_f64(user.id as f64)])
+            .map_err(|_| OAuthFailureReason::AccountError)?;
+        let claim_user = db
+            .prepare(CLAIM_UNVERIFIED_USER_SQL)
+            .bind(&[
+                OAUTH_ONLY_PASSWORD_HASH.into(),
+                wasm_bindgen::JsValue::from_f64(user.id as f64),
+            ])
+            .map_err(|_| OAuthFailureReason::AccountError)?;
+
+        db.batch(vec![link_stmt, wipe_sessions, wipe_tokens, claim_user])
+            .await
+            .map_err(|_| OAuthFailureReason::AccountError)?;
+    } else {
+        // Already-verified account: link without modifying password, sessions, or tokens (AC-O12).
+        link_stmt
+            .run()
+            .await
+            .map_err(|_| OAuthFailureReason::AccountError)?;
+    }
+
+    Ok(())
+}
+
 async fn resolve_or_create_user(
     db: &D1Database,
     provider: Provider,
@@ -559,7 +619,7 @@ async fn resolve_or_create_user(
 ) -> std::result::Result<i64, OAuthFailureReason> {
     // a) Existing (provider, subject) link -> always return that user (AC-O9, I2).
     let linked = db
-        .prepare("SELECT user_id FROM oauth_accounts WHERE provider = ?1 AND subject = ?2")
+        .prepare(SELECT_OAUTH_ACCOUNT_USER_SQL)
         .bind(&[provider.as_str().into(), identity.subject.as_str().into()])
         .map_err(|_| OAuthFailureReason::AccountError)?
         .first::<OAuthUserIdRow>(None)
@@ -580,43 +640,17 @@ async fn resolve_or_create_user(
         .filter(|e| is_valid_email(e))
         .ok_or(OAuthFailureReason::EmailUnverified)?;
 
-    // c) Existing users row with matching verified email -> link & mark email verified (AC-O3).
+    // c) Existing users row with matching verified email -> link (and wipe unverified pre-hijack state, AC-O3/O12).
     let existing = db
-        .prepare("SELECT id FROM users WHERE email = ?1")
+        .prepare("SELECT id, email_verified_at FROM users WHERE email = ?1")
         .bind(&[email.into()])
         .map_err(|_| OAuthFailureReason::AccountError)?
-        .first::<UserIdRow>(None)
+        .first::<UserEmailRow>(None)
         .await
         .map_err(|_| OAuthFailureReason::AccountError)?;
 
-    let user_id = if let Some(u) = existing {
-        let link_stmt = db
-            .prepare(
-                "INSERT INTO oauth_accounts (provider, subject, user_id, created_at) \
-                 VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT(provider, subject) DO NOTHING",
-            )
-            .bind(&[
-                provider.as_str().into(),
-                identity.subject.as_str().into(),
-                wasm_bindgen::JsValue::from_f64(u.id as f64),
-                wasm_bindgen::JsValue::from_f64(now as f64),
-            ])
-            .map_err(|_| OAuthFailureReason::AccountError)?;
-
-        let verify_stmt = db
-            .prepare(
-                "UPDATE users \
-                 SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
-                 WHERE id = ?1",
-            )
-            .bind(&[wasm_bindgen::JsValue::from_f64(u.id as f64)])
-            .map_err(|_| OAuthFailureReason::AccountError)?;
-
-        db.batch(vec![link_stmt, verify_stmt])
-            .await
-            .map_err(|_| OAuthFailureReason::AccountError)?;
-        u.id
+    if let Some(u) = existing {
+        link_existing_user(db, provider, &identity.subject, &u, now).await?;
     } else {
         // d) Create a new OAuth-only user (password_hash = '!oauth', email_verified_at = now).
         let inserted = db
@@ -632,53 +666,44 @@ async fn resolve_or_create_user(
             .await
             .map_err(|_| OAuthFailureReason::AccountError)?;
 
-        let uid = if let Some(row) = inserted {
-            row.id
+        if let Some(row) = inserted {
+            db.prepare(INSERT_OAUTH_ACCOUNT_SQL)
+                .bind(&[
+                    provider.as_str().into(),
+                    identity.subject.as_str().into(),
+                    wasm_bindgen::JsValue::from_f64(row.id as f64),
+                    wasm_bindgen::JsValue::from_f64(now as f64),
+                ])
+                .map_err(|_| OAuthFailureReason::AccountError)?
+                .run()
+                .await
+                .map_err(|_| OAuthFailureReason::AccountError)?;
         } else {
-            // Concurrent creation race: re-read the existing user and mark verified.
+            // Concurrent creation race: re-read the existing user and apply the same linking rule (F1).
             let raced = db
-                .prepare("SELECT id FROM users WHERE email = ?1")
+                .prepare("SELECT id, email_verified_at FROM users WHERE email = ?1")
                 .bind(&[email.into()])
                 .map_err(|_| OAuthFailureReason::AccountError)?
-                .first::<UserIdRow>(None)
+                .first::<UserEmailRow>(None)
                 .await
                 .map_err(|_| OAuthFailureReason::AccountError)?
                 .ok_or(OAuthFailureReason::AccountError)?;
 
-            db.prepare(
-                "UPDATE users \
-                 SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
-                 WHERE id = ?1",
-            )
-            .bind(&[wasm_bindgen::JsValue::from_f64(raced.id as f64)])
-            .map_err(|_| OAuthFailureReason::AccountError)?
-            .run()
-            .await
-            .map_err(|_| OAuthFailureReason::AccountError)?;
+            link_existing_user(db, provider, &identity.subject, &raced, now).await?;
+        }
+    }
 
-            raced.id
-        };
-
-        db.prepare(
-            "INSERT INTO oauth_accounts (provider, subject, user_id, created_at) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(provider, subject) DO NOTHING",
-        )
-        .bind(&[
-            provider.as_str().into(),
-            identity.subject.as_str().into(),
-            wasm_bindgen::JsValue::from_f64(uid as f64),
-            wasm_bindgen::JsValue::from_f64(now as f64),
-        ])
+    // F3: always re-read the committed (provider, subject) owner after INSERT ... ON CONFLICT DO NOTHING.
+    let resolved = db
+        .prepare(SELECT_OAUTH_ACCOUNT_USER_SQL)
+        .bind(&[provider.as_str().into(), identity.subject.as_str().into()])
         .map_err(|_| OAuthFailureReason::AccountError)?
-        .run()
+        .first::<OAuthUserIdRow>(None)
         .await
-        .map_err(|_| OAuthFailureReason::AccountError)?;
+        .map_err(|_| OAuthFailureReason::AccountError)?
+        .ok_or(OAuthFailureReason::AccountError)?;
 
-        uid
-    };
-
-    Ok(user_id)
+    Ok(resolved.user_id)
 }
 
 fn oauth_start_error_redirect(provider: Provider, reason: OAuthFailureReason) -> Result<Response> {
@@ -710,53 +735,127 @@ fn oauth_callback_success_redirect(session_cookie: &str) -> Result<Response> {
     Ok(Response::empty()?.with_status(302).with_headers(headers))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthStartStep {
+    RateLimitDb,
+    RateLimitExceeded,
+    Config,
+    TokenGen,
+    StateBindOrBatch,
+    AuthorizeUrl,
+    ResponseHeaders,
+}
+
+/// Maps every failure mode in `GET /api/auth/oauth/{provider}/start` to an `OAuthFailureReason`
+/// so no D1 bind/run error or header error can surface as a 500 (F6).
+pub fn map_oauth_start_error(step: OAuthStartStep) -> OAuthFailureReason {
+    match step {
+        OAuthStartStep::RateLimitDb => OAuthFailureReason::AccountError,
+        OAuthStartStep::RateLimitExceeded => OAuthFailureReason::RateLimited,
+        OAuthStartStep::Config => OAuthFailureReason::MissingCredentials,
+        OAuthStartStep::TokenGen => OAuthFailureReason::AccountError,
+        OAuthStartStep::StateBindOrBatch => OAuthFailureReason::AccountError,
+        OAuthStartStep::AuthorizeUrl => OAuthFailureReason::MissingCredentials,
+        OAuthStartStep::ResponseHeaders => OAuthFailureReason::AccountError,
+    }
+}
+
+/// Builds the fixed `/login?error=oauth` redirect descriptor and structured single-line log
+/// for any `OAuthStartStep` failure (F6).
+pub fn oauth_start_failure_spec(
+    provider: Provider,
+    step: OAuthStartStep,
+) -> (u16, &'static str, OAuthFailureReason, String) {
+    let reason = map_oauth_start_error(step);
+    let log_line = format_oauth_failure_log(provider, reason);
+    (302, OAUTH_ERROR_LOCATION, reason, log_line)
+}
+
+async fn run_oauth_start(
+    req: &Request,
+    env: &Env,
+    db: &D1Database,
+    app_origin: &str,
+    provider: Provider,
+) -> std::result::Result<(String, String), OAuthFailureReason> {
+    let now = now_sec();
+
+    // F4: rate-limit start requests per client IP (30 per 10 minutes, same window as callback)
+    // before writing anything to oauth_states.
+    let ip = client_ip(req).unwrap_or_else(|| "unknown".to_string());
+    let rate_key = format!("oauth_start:{ip}");
+    let window_start = oauth_callback_window(now);
+    let count = consume_rate_limit(db, &rate_key, window_start, now)
+        .await
+        .map_err(|_| map_oauth_start_error(OAuthStartStep::RateLimitDb))?;
+    if count > OAUTH_CALLBACK_MAX_PER_WINDOW {
+        return Err(map_oauth_start_error(OAuthStartStep::RateLimitExceeded));
+    }
+
+    let config = ProviderConfig::from_env(provider, env, app_origin)
+        .ok_or_else(|| map_oauth_start_error(OAuthStartStep::Config))?;
+
+    let state =
+        generate_session_token().map_err(|_| map_oauth_start_error(OAuthStartStep::TokenGen))?;
+    let verifier =
+        generate_session_token().map_err(|_| map_oauth_start_error(OAuthStartStep::TokenGen))?;
+    let challenge = pkce_s256_challenge(&verifier);
+    let state_hash = hash_session_token(&state);
+
+    let expires_at = oauth_state_expires_at(now);
+
+    let del_expired = db
+        .prepare(DELETE_EXPIRED_OAUTH_STATES_SQL)
+        .bind(&[wasm_bindgen::JsValue::from_f64(now as f64)])
+        .map_err(|_| map_oauth_start_error(OAuthStartStep::StateBindOrBatch))?;
+    let ins_state = db
+        .prepare(INSERT_OAUTH_STATE_SQL)
+        .bind(&[
+            state_hash.as_str().into(),
+            provider.as_str().into(),
+            verifier.as_str().into(),
+            wasm_bindgen::JsValue::from_f64(expires_at as f64),
+        ])
+        .map_err(|_| map_oauth_start_error(OAuthStartStep::StateBindOrBatch))?;
+
+    db.batch(vec![del_expired, ins_state])
+        .await
+        .map_err(|_| map_oauth_start_error(OAuthStartStep::StateBindOrBatch))?;
+
+    let redirect_uri = build_redirect_uri(app_origin, provider);
+    let authorize_url = config
+        .build_authorize_url(&redirect_uri, &state, &challenge)
+        .map_err(|_| map_oauth_start_error(OAuthStartStep::AuthorizeUrl))?;
+
+    Ok((authorize_url, state))
+}
+
+fn build_oauth_start_redirect(authorize_url: &str, state: &str) -> Result<Response> {
+    let headers = Headers::new();
+    headers.set("Location", authorize_url)?;
+    headers.set("Cache-Control", "no-store")?;
+    headers.append("Set-Cookie", &oauth_cookie_header(state))?;
+    Ok(Response::empty()?.with_status(302).with_headers(headers))
+}
+
 /// `GET /api/auth/oauth/{provider}/start`
 pub async fn handle_oauth_start(
+    req: &Request,
     env: &Env,
     db: &D1Database,
     app_origin: &str,
     provider: Provider,
 ) -> Result<Response> {
-    let Some(config) = ProviderConfig::from_env(provider, env, app_origin) else {
-        return oauth_start_error_redirect(provider, OAuthFailureReason::MissingCredentials);
-    };
-
-    let Ok(state) = generate_session_token() else {
-        return oauth_start_error_redirect(provider, OAuthFailureReason::AccountError);
-    };
-    let Ok(verifier) = generate_session_token() else {
-        return oauth_start_error_redirect(provider, OAuthFailureReason::AccountError);
-    };
-    let challenge = pkce_s256_challenge(&verifier);
-    let state_hash = hash_session_token(&state);
-
-    let now = now_sec();
-    let expires_at = oauth_state_expires_at(now);
-
-    let del_expired = db
-        .prepare(DELETE_EXPIRED_OAUTH_STATES_SQL)
-        .bind(&[wasm_bindgen::JsValue::from_f64(now as f64)])?;
-    let ins_state = db.prepare(INSERT_OAUTH_STATE_SQL).bind(&[
-        state_hash.as_str().into(),
-        provider.as_str().into(),
-        verifier.as_str().into(),
-        wasm_bindgen::JsValue::from_f64(expires_at as f64),
-    ])?;
-
-    if db.batch(vec![del_expired, ins_state]).await.is_err() {
-        return oauth_start_error_redirect(provider, OAuthFailureReason::AccountError);
+    match run_oauth_start(req, env, db, app_origin, provider).await {
+        Ok((authorize_url, state)) => match build_oauth_start_redirect(&authorize_url, &state) {
+            Ok(res) => Ok(res),
+            Err(_) => oauth_start_error_redirect(
+                provider,
+                map_oauth_start_error(OAuthStartStep::ResponseHeaders),
+            ),
+        },
+        Err(reason) => oauth_start_error_redirect(provider, reason),
     }
-
-    let redirect_uri = build_redirect_uri(app_origin, provider);
-    let Ok(authorize_url) = config.build_authorize_url(&redirect_uri, &state, &challenge) else {
-        return oauth_start_error_redirect(provider, OAuthFailureReason::MissingCredentials);
-    };
-
-    let headers = Headers::new();
-    headers.set("Location", &authorize_url)?;
-    headers.set("Cache-Control", "no-store")?;
-    headers.append("Set-Cookie", &oauth_cookie_header(&state))?;
-    Ok(Response::empty()?.with_status(302).with_headers(headers))
 }
 
 async fn run_oauth_callback(
@@ -1103,5 +1202,49 @@ mod tests {
     fn oauth_state_expiry_is_ten_minutes() {
         assert_eq!(OAUTH_STATE_TTL_SECS, 600);
         assert_eq!(oauth_state_expires_at(1_700_000_000), 1_700_000_600);
+    }
+
+    #[test]
+    fn oauth_start_errors_map_to_redirect_and_single_line_reason_log_without_500() {
+        let cases = [
+            (OAuthStartStep::RateLimitDb, OAuthFailureReason::AccountError),
+            (
+                OAuthStartStep::RateLimitExceeded,
+                OAuthFailureReason::RateLimited,
+            ),
+            (
+                OAuthStartStep::Config,
+                OAuthFailureReason::MissingCredentials,
+            ),
+            (OAuthStartStep::TokenGen, OAuthFailureReason::AccountError),
+            (
+                OAuthStartStep::StateBindOrBatch,
+                OAuthFailureReason::AccountError,
+            ),
+            (
+                OAuthStartStep::AuthorizeUrl,
+                OAuthFailureReason::MissingCredentials,
+            ),
+            (
+                OAuthStartStep::ResponseHeaders,
+                OAuthFailureReason::AccountError,
+            ),
+        ];
+
+        for provider in [Provider::Google, Provider::Github] {
+            for (step, expected_reason) in cases {
+                let (status, location, reason, log_line) =
+                    oauth_start_failure_spec(provider, step);
+                assert_eq!(status, 302);
+                assert_eq!(location, OAUTH_ERROR_LOCATION);
+                assert_eq!(reason, expected_reason);
+                assert!(!log_line.contains('\n'));
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&log_line).expect("valid JSON log");
+                assert_eq!(parsed["event"], "oauth_failed");
+                assert_eq!(parsed["provider"], provider.as_str());
+                assert_eq!(parsed["reason"], expected_reason.as_str());
+            }
+        }
     }
 }

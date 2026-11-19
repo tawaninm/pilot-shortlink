@@ -5,11 +5,14 @@
 use pilot_shortlink_a::auth::{
     email_token_expires_at, generate_email_token, hash_email_token, CONSUME_EMAIL_TOKEN_SQL,
     DELETE_UNUSED_EMAIL_TOKENS_SQL, EMAIL_TOKEN_EXPIRY_SECS, INSERT_EMAIL_TOKEN_SQL,
+    OAUTH_ONLY_PASSWORD_HASH,
 };
 use pilot_shortlink_a::mail::TokenPurpose;
 use pilot_shortlink_a::oauth::{
-    oauth_state_expires_at, Provider, CONSUME_OAUTH_STATE_SQL, DELETE_EXPIRED_OAUTH_STATES_SQL,
-    INSERT_OAUTH_STATE_SQL, OAUTH_STATE_TTL_SECS,
+    oauth_state_expires_at, Provider, CLAIM_UNVERIFIED_USER_SQL, CONSUME_OAUTH_STATE_SQL,
+    DELETE_EXPIRED_OAUTH_STATES_SQL, INSERT_OAUTH_ACCOUNT_SQL, INSERT_OAUTH_STATE_SQL,
+    OAUTH_STATE_TTL_SECS, SELECT_OAUTH_ACCOUNT_USER_SQL, WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL,
+    WIPE_UNVERIFIED_USER_SESSIONS_SQL,
 };
 use pilot_shortlink_a::session::{generate_session_token, hash_session_token};
 use rusqlite::Connection;
@@ -641,4 +644,156 @@ fn oauth_accounts_and_states_schema_constraints_and_atomic_expiry() {
         .query_row("SELECT COUNT(*) FROM oauth_states", [], |r| r.get(0))
         .expect("count oauth_states");
     assert_eq!(states_left, 0);
+}
+
+#[test]
+fn ac_o12_pre_hijack_sql_wipes_unverified_state_and_preserves_verified_state() {
+    let conn = setup_db();
+
+    // User 1: unverified squatter account with password, active session, unused + used email tokens.
+    conn.execute(
+        "INSERT INTO users (id, email, password_hash, email_verified_at) VALUES (1, 'victim@example.com', 'squatter-phc', NULL)",
+        [],
+    )
+    .expect("insert unverified user");
+    conn.execute(
+        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ('sess-unverified', 1, 9999999999)",
+        [],
+    )
+    .expect("insert squatter session");
+    conn.execute(
+        "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at, used_at) VALUES ('tok-unused', 1, 'verify', 9999999999, NULL), ('tok-used', 1, 'verify', 9999999999, 1700000000)",
+        [],
+    )
+    .expect("insert squatter tokens");
+
+    // User 2: verified account with password, active session, unused email token.
+    conn.execute(
+        "INSERT INTO users (id, email, password_hash, email_verified_at) VALUES (2, 'verified@example.com', 'owner-phc', '2026-11-19T00:00:00.000Z')",
+        [],
+    )
+    .expect("insert verified user");
+    conn.execute(
+        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ('sess-verified', 2, 9999999999)",
+        [],
+    )
+    .expect("insert owner session");
+    conn.execute(
+        "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at, used_at) VALUES ('tok-owner-unused', 2, 'reset', 9999999999, NULL)",
+        [],
+    )
+    .expect("insert owner token");
+
+    // Run F1 + F3 batch on unverified user 1.
+    conn.execute(
+        INSERT_OAUTH_ACCOUNT_SQL,
+        rusqlite::params![Provider::Google.as_str(), "sub-victim", 1_i64, 1_700_000_000_i64],
+    )
+    .expect("link oauth account for user 1");
+    conn.execute(WIPE_UNVERIFIED_USER_SESSIONS_SQL, rusqlite::params![1_i64])
+        .expect("wipe squatter sessions");
+    conn.execute(WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL, rusqlite::params![1_i64])
+        .expect("wipe squatter unused email tokens");
+    conn.execute(
+        CLAIM_UNVERIFIED_USER_SQL,
+        rusqlite::params![OAUTH_ONLY_PASSWORD_HASH, 1_i64],
+    )
+    .expect("claim unverified user 1");
+
+    let resolved_u1: i64 = conn
+        .query_row(
+            SELECT_OAUTH_ACCOUNT_USER_SQL,
+            rusqlite::params![Provider::Google.as_str(), "sub-victim"],
+            |r| r.get(0),
+        )
+        .expect("re-read oauth_accounts user_id");
+    assert_eq!(resolved_u1, 1);
+
+    let (u1_hash, u1_verified): (String, Option<String>) = conn
+        .query_row(
+            "SELECT password_hash, email_verified_at FROM users WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("query user 1");
+    assert_eq!(u1_hash, OAUTH_ONLY_PASSWORD_HASH);
+    assert!(u1_verified.is_some());
+
+    let u1_sessions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sessions WHERE user_id = 1", [], |r| r.get(0))
+        .expect("count user 1 sessions");
+    assert_eq!(u1_sessions, 0);
+
+    let u1_unused_tokens: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM email_tokens WHERE user_id = 1 AND used_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count user 1 unused tokens");
+    assert_eq!(u1_unused_tokens, 0);
+
+    let u1_used_tokens: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM email_tokens WHERE user_id = 1 AND used_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count user 1 used tokens");
+    assert_eq!(u1_used_tokens, 1);
+
+    // Even if the wipe/claim SQL were executed against verified user 2, the email_verified_at IS NULL guard keeps it intact.
+    conn.execute(
+        INSERT_OAUTH_ACCOUNT_SQL,
+        rusqlite::params![Provider::Github.as_str(), "sub-owner", 2_i64, 1_700_000_000_i64],
+    )
+    .expect("link oauth account for user 2");
+    conn.execute(WIPE_UNVERIFIED_USER_SESSIONS_SQL, rusqlite::params![2_i64])
+        .expect("no-op wipe sessions on verified user 2");
+    conn.execute(WIPE_UNVERIFIED_USER_EMAIL_TOKENS_SQL, rusqlite::params![2_i64])
+        .expect("no-op wipe tokens on verified user 2");
+    conn.execute(
+        CLAIM_UNVERIFIED_USER_SQL,
+        rusqlite::params![OAUTH_ONLY_PASSWORD_HASH, 2_i64],
+    )
+    .expect("no-op claim on verified user 2");
+
+    let (u2_hash, u2_verified): (String, Option<String>) = conn
+        .query_row(
+            "SELECT password_hash, email_verified_at FROM users WHERE id = 2",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("query user 2");
+    assert_eq!(u2_hash, "owner-phc");
+    assert_eq!(u2_verified.as_deref(), Some("2026-11-19T00:00:00.000Z"));
+
+    let u2_sessions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sessions WHERE user_id = 2", [], |r| r.get(0))
+        .expect("count user 2 sessions");
+    assert_eq!(u2_sessions, 1);
+
+    let u2_unused_tokens: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM email_tokens WHERE user_id = 2 AND used_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count user 2 unused tokens");
+    assert_eq!(u2_unused_tokens, 1);
+
+    // F3: duplicate INSERT ... ON CONFLICT DO NOTHING keeps original user_id, and re-read returns original owner.
+    conn.execute(
+        INSERT_OAUTH_ACCOUNT_SQL,
+        rusqlite::params![Provider::Google.as_str(), "sub-victim", 2_i64, 1_700_000_001_i64],
+    )
+    .expect("conflict do nothing");
+    let still_u1: i64 = conn
+        .query_row(
+            SELECT_OAUTH_ACCOUNT_USER_SQL,
+            rusqlite::params![Provider::Google.as_str(), "sub-victim"],
+            |r| r.get(0),
+        )
+        .expect("re-read after conflict");
+    assert_eq!(still_u1, 1);
 }

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use crate::http::{encode_form_urlencoded, json_response, read_env_string};
+use crate::http::{
+    encode_form_urlencoded, fetch_text_with_timeout, json_response, read_env_string,
+    OutboundFetchError, OUTBOUND_FETCH_TIMEOUT,
+};
 use crate::mail::is_local_origin;
 
 /// Cloudflare Turnstile server-side verification endpoint.
@@ -177,17 +180,20 @@ impl CaptchaVerifier for CloudflareCaptchaVerifier {
             emit_captcha_failure_log(CaptchaFailureReason::Transport);
             return false;
         };
-        let Ok(mut res) = Fetch::Request(req).send().await else {
-            emit_captcha_failure_log(CaptchaFailureReason::Transport);
-            return false;
-        };
-        if !(200..300).contains(&res.status_code()) {
-            emit_captcha_failure_log(CaptchaFailureReason::HttpStatus);
-            return false;
-        }
-        let Ok(text) = res.text().await else {
-            emit_captcha_failure_log(CaptchaFailureReason::InvalidResponse);
-            return false;
+        let text = match fetch_text_with_timeout(req, OUTBOUND_FETCH_TIMEOUT).await {
+            Ok(text) => text,
+            Err(OutboundFetchError::Timeout | OutboundFetchError::Transport) => {
+                emit_captcha_failure_log(CaptchaFailureReason::Transport);
+                return false;
+            }
+            Err(OutboundFetchError::HttpStatus(_)) => {
+                emit_captcha_failure_log(CaptchaFailureReason::HttpStatus);
+                return false;
+            }
+            Err(OutboundFetchError::BodyRead) => {
+                emit_captcha_failure_log(CaptchaFailureReason::InvalidResponse);
+                return false;
+            }
         };
         let Ok(parsed) = serde_json::from_str::<SiteverifyResponse>(&text) else {
             emit_captcha_failure_log(CaptchaFailureReason::InvalidResponse);

@@ -222,7 +222,7 @@ async fn route_request(
                 match rest.split_once('/') {
                     Some((raw_provider, "start")) => match oauth::Provider::parse(raw_provider) {
                         Some(provider) => Ok((
-                            oauth::handle_oauth_start(env, &db, &app_origin, provider).await?,
+                            oauth::handle_oauth_start(req, env, &db, &app_origin, provider).await?,
                             None,
                         )),
                         None => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
