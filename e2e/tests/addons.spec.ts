@@ -127,9 +127,15 @@ test("AC-Q1: the QR download is <code>.svg and decodes to the short URL", async 
 test("AC-Q2: the QR button is reachable by keyboard and has an accessible name", async ({ page }) => {
   await register(page);
   const code = await createLink(page, "https://example.com/qr-key", `qk-${Date.now().toString(36)}`);
-  await openRowActions(page, code);
-  const button = page.getByRole("button", { name: `ดาวน์โหลด QR ของ /${code}` });
-  await button.focus();
+  const label = `ดาวน์โหลด QR ของ /${code}`;
+  const button = page.getByRole("button", { name: label });
+  // Reach it with Tab only (a tabIndex=-1 button must fail this); on narrow screens open the row with Enter
+  const active = () => page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.getAttribute("aria-controls") ?? "");
+  await page.locator("body").press("Tab");
+  for (let i = 0; i < 80 && (await active()) !== label; i++) {
+    if ((await active()) === `stats-${code}` && (await button.isHidden())) await page.keyboard.press("Enter");
+    await page.keyboard.press("Tab");
+  }
   await expect(button).toBeFocused();
   const [download] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
   expect(download.suggestedFilename()).toBe(`${code}.svg`);

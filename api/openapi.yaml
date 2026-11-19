@@ -83,7 +83,7 @@ paths:
   /api/auth/password/forgot:
     post:
       summary: ขอลิงก์รีเซ็ตรหัสผ่านทางอีเมล
-      description: ตอบ 204 เหมือนกันไม่ว่ามี email นี้หรือไม่ ส่งอีเมลเฉพาะ email ที่มีบัญชี ไม่เกิน 3 ครั้งต่อชั่วโมงต่อ email ขอใหม่แล้ว token รีเซ็ตก่อนหน้าใช้ไม่ได้
+      description: ตอบ 204 เหมือนกันไม่ว่ามี email นี้หรือไม่ ส่งอีเมลเฉพาะ email ที่มีบัญชี ไม่เกิน 3 ฉบับต่อชั่วโมงต่อ email คำขอที่เกินตอบ 204 แต่ไม่ส่งอีเมลและไม่ยกเลิก token เดิม (ไม่ตอบ 429 เพื่อไม่ให้คนอื่นล็อกเจ้าของบัญชี) ขอใหม่ภายในโควตาแล้ว token รีเซ็ตก่อนหน้าใช้ไม่ได้
       security: []
       requestBody:
         required: true
@@ -98,7 +98,6 @@ paths:
         '204': { description: รับคำขอแล้ว }
         '403': { $ref: '#/components/responses/Forbidden' }
         '422': { $ref: '#/components/responses/Invalid' }
-        '429': { $ref: '#/components/responses/RateLimited' }
   /api/auth/password/reset:
     post:
       summary: ตั้งรหัสผ่านใหม่ด้วย token จากอีเมล

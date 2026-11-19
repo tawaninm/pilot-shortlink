@@ -1,7 +1,7 @@
 // Forgot / reset password (requirements AC-R1..R7, test-plan section 8). Token expiry is in backend unit tests.
 import { describe, expect, it } from "vitest";
 import {
-  anon, mailCountAfterPause, PASSWORD, problem, registerUnverified, registerUser, sessionCookie, tokenFrom, uniqueEmail,
+  anon, mailCountAfterPause, PASSWORD, problem, readMail, registerUnverified, registerUser, sessionCookie, tokenFrom, uniqueEmail,
   waitForMail, withCookie,
 } from "../src/client";
 
@@ -74,12 +74,16 @@ describe("password reset", () => {
     expect((await reset(second)).response.status).toBe(204);
   });
 
-  it("AC-R5: the 4th forgot request for one email within an hour returns 429", async () => {
+  it("AC-R5: the 4th forgot request in an hour returns 204, sends nothing and keeps the 3rd link usable", async () => {
     const { email } = await registerUser();
+    const resetMails = async () => (await readMail(email)).filter((m) => m.text.includes("/reset-password?token="));
     for (let i = 0; i < 3; i++) expect((await forgot(email)).response.status).toBe(204);
-    const fourth = await forgot(email);
-    expect(fourth.response.status).toBe(429);
-    expect((await problem(fourth.response)).code).toBe("rate_limited");
+    await waitForMail(email, 4); // 1 verify + 3 reset
+    const third = tokenFrom(await resetMails(), "reset-password");
+    expect((await forgot(email)).response.status).toBe(204);
+    expect(await mailCountAfterPause(email)).toBe(4);
+    expect((await resetMails()).length).toBe(3);
+    expect((await reset(third)).response.status).toBe(204);
   });
 
   it("AC-R6: resetting an unverified account marks the email verified", async () => {

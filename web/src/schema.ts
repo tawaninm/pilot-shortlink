@@ -222,7 +222,7 @@ export interface paths {
         put?: never;
         /**
          * ขอลิงก์รีเซ็ตรหัสผ่านทางอีเมล
-         * @description ตอบ 204 เหมือนกันไม่ว่ามี email นี้หรือไม่ ส่งอีเมลเฉพาะ email ที่มีบัญชี ไม่เกิน 3 ครั้งต่อชั่วโมงต่อ email ขอใหม่แล้ว token รีเซ็ตก่อนหน้าใช้ไม่ได้
+         * @description ตอบ 204 เหมือนกันไม่ว่ามี email นี้หรือไม่ ส่งอีเมลเฉพาะ email ที่มีบัญชี ไม่เกิน 3 ฉบับต่อชั่วโมงต่อ email คำขอที่เกินตอบ 204 แต่ไม่ส่งอีเมลและไม่ยกเลิก token เดิม (ไม่ตอบ 429 เพื่อไม่ให้คนอื่นล็อกเจ้าของบัญชี) ขอใหม่ภายในโควตาแล้ว token รีเซ็ตก่อนหน้าใช้ไม่ได้
          */
         post: {
             parameters: {
@@ -249,7 +249,6 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 422: components["responses"]["Invalid"];
-                429: components["responses"]["RateLimited"];
             };
         };
         delete?: never;
