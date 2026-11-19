@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   anon, BASE_URL, CAPTCHA, fakeAuthorize, githubUser, googleUser, oauthCallback, oauthLogin, oauthStart, ORIGIN, PASSWORD,
-  registerUser, tokenFrom, uniqueEmail, waitForMail, withCookie,
+  registerUnverified, registerUser, tokenFrom, uniqueEmail, waitForMail, withCookie,
 } from "../src/client";
 
 const ERROR = "/login?error=oauth";
@@ -48,6 +48,24 @@ describe("oauth", () => {
       const links = (await withCookie(session).GET("/api/links")).data;
       expect(links?.items.map((l) => l.code)).toContain(created.data?.code);
     }
+  });
+
+  it("AC-O12: linking to an unverified password account wipes the squatter's password and sessions", async () => {
+    const email = uniqueEmail();
+    const squatter = await registerUnverified(email); // someone else registered our email first
+    const { location, session } = await oauthLogin("google", googleUser(email));
+    expect(location).toBe("/");
+    expect((await me(session))?.email).toBe(email);
+    expect((await squatter.api.GET("/api/me")).response.status).toBe(401);
+    const login = await anon().POST("/api/auth/login", { body: { email, password: PASSWORD } });
+    expect(login.response.status).toBe(401);
+  });
+
+  it("AC-O12: linking to a verified password account keeps its password", async () => {
+    const owner = await registerUser();
+    expect((await oauthLogin("github", githubUser(owner.email))).location).toBe("/");
+    const login = await anon().POST("/api/auth/login", { body: { email: owner.email, password: PASSWORD } });
+    expect(login.response.status).toBe(200);
   });
 
   it("AC-O4: an unverified provider email neither links nor creates an account", async () => {
