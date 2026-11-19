@@ -1,13 +1,14 @@
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Algorithm, Argon2, Params, Version,
 };
 use serde::{Deserialize, Serialize};
 use worker::*;
 
+use crate::captcha::{CaptchaVerifier, EnvCaptchaVerifier};
 use crate::http::{
-    json_response_with_headers, now_ms, now_sec, problem_field_response, problem_response,
-    rate_limited_response, read_json_body,
+    client_ip, json_response_with_headers, now_ms, now_sec, problem_field_response,
+    problem_response, rate_limited_response, read_json_body,
 };
 use crate::mail::{spawn_purpose_mail, EnvMailer, TokenPurpose};
 use crate::session::{
@@ -26,6 +27,9 @@ pub const SALT_LEN: usize = 16;
 /// a login attempt references an unknown email so response timing matches a real user check.
 pub const DUMMY_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// Non-PHC sentinel stored in `users.password_hash` for accounts created via OAuth (D2, I8, AC-O8).
+pub const OAUTH_ONLY_PASSWORD_HASH: &str = "!oauth";
 
 /// Fixed 15-minute window (in seconds) and failure threshold for login rate limiting (`rate_limits`).
 pub const LOGIN_WINDOW_SECS: i64 = 15 * 60;
@@ -67,6 +71,15 @@ pub struct Credentials {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RegisterBody {
+    pub email: String,
+    pub password: String,
+    #[serde(default)]
+    pub captcha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TokenBody {
     pub token: String,
 }
@@ -75,6 +88,8 @@ pub struct TokenBody {
 #[serde(deny_unknown_fields)]
 pub struct ForgotPasswordBody {
     pub email: String,
+    #[serde(default)]
+    pub captcha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +153,22 @@ pub fn hash_password_argon2id(password: &str) -> std::result::Result<(String, u6
         .to_string();
     let elapsed = now_ms().saturating_sub(start);
     Ok((hash, elapsed))
+}
+
+/// Returns `true` if `stored_hash` is a syntactically valid PHC string (and not a sentinel like `"!oauth"`).
+pub fn is_valid_phc_hash(stored_hash: &str) -> bool {
+    PasswordHash::new(stored_hash).is_ok()
+}
+
+/// Selects the PHC hash to run Argon2id against for constant-time login checks.
+/// Returns `(hash_to_verify, has_usable_password)`. When no user exists or `password_hash` is
+/// not a valid PHC string (such as `"!oauth"`), falls back to `DUMMY_PASSWORD_HASH` with
+/// `has_usable_password = false` so timing matches a real check and login always fails with 401 (AC-O8, I8).
+pub fn select_verification_hash(stored_hash: Option<&str>) -> (&str, bool) {
+    match stored_hash {
+        Some(h) if is_valid_phc_hash(h) => (h, true),
+        _ => (DUMMY_PASSWORD_HASH, false),
+    }
 }
 
 /// Verifies `password` against a PHC string `phc_hash` in constant time.
@@ -211,7 +242,7 @@ pub fn hourly_window(now_sec: i64) -> (i64, i64) {
     (window_start, retry_after)
 }
 
-async fn consume_rate_limit(
+pub(crate) async fn consume_rate_limit(
     db: &D1Database,
     key: &str,
     window_start: i64,
@@ -310,18 +341,30 @@ pub async fn handle_register(
     db: &D1Database,
     app_origin: &str,
     mailer: EnvMailer,
+    captcha: &EnvCaptchaVerifier,
     ctx: &Context,
 ) -> Result<(Response, Option<u64>)> {
     let raw_body = match read_json_body(req).await? {
         Ok(bytes) => bytes,
         Err(res) => return Ok((res, None)),
     };
-    let Ok(creds) = serde_json::from_slice::<Credentials>(&raw_body) else {
+    let Ok(creds) = serde_json::from_slice::<RegisterBody>(&raw_body) else {
         return Ok((
             problem_response(422, "Unprocessable Entity", "invalid_body")?,
             None,
         ));
     };
+
+    let remote_ip = client_ip(req);
+    if !captcha
+        .verify(creds.captcha.as_deref(), remote_ip.as_deref())
+        .await
+    {
+        return Ok((
+            problem_response(403, "Forbidden", "captcha_failed")?,
+            None,
+        ));
+    }
 
     if !is_valid_password_len(&creds.password) {
         return Ok((
@@ -432,12 +475,11 @@ pub async fn handle_login(req: &mut Request, db: &D1Database) -> Result<(Respons
         .first::<UserAuthRow>(None)
         .await?;
 
-    let target_hash = user
-        .as_ref()
-        .map_or(DUMMY_PASSWORD_HASH, |u| u.password_hash.as_str());
+    let (target_hash, has_usable_password) =
+        select_verification_hash(user.as_ref().map(|u| u.password_hash.as_str()));
     let (password_ok, hash_ms) = verify_password_argon2id(&creds.password, target_hash);
 
-    match (user, password_ok) {
+    match (user, has_usable_password && password_ok) {
         (Some(u), true) => {
             clear_login_rate_limit(db, &rate_key).await?;
             let token = create_session(db, u.id, now).await?;
@@ -560,6 +602,7 @@ pub async fn handle_forgot_password(
     db: &D1Database,
     app_origin: &str,
     mailer: EnvMailer,
+    captcha: &EnvCaptchaVerifier,
     ctx: &Context,
 ) -> Result<Response> {
     let raw_body = match read_json_body(req).await? {
@@ -571,16 +614,30 @@ pub async fn handle_forgot_password(
     };
 
     let email = normalize_email(&payload.email);
-    if !is_valid_email(&email) {
-        return problem_field_response(422, "Unprocessable Entity", "invalid_body", "email");
+    let now = now_sec();
+    let email_valid = is_valid_email(&email);
+
+    // Count the request against the per-email rate limit BEFORE verifying captcha (I9),
+    // so attackers cannot bypass rate limits or trigger free Turnstile checks.
+    if email_valid {
+        let (window_start, _) = hourly_window(now);
+        let rate_key = format!("forgot:{email}");
+        let count = consume_rate_limit(db, &rate_key, window_start, now).await?;
+        if count > FORGOT_MAX_PER_HOUR {
+            return Ok(Response::empty()?.with_status(204));
+        }
     }
 
-    let now = now_sec();
-    let (window_start, _) = hourly_window(now);
-    let rate_key = format!("forgot:{email}");
-    let count = consume_rate_limit(db, &rate_key, window_start, now).await?;
-    if count > FORGOT_MAX_PER_HOUR {
-        return Ok(Response::empty()?.with_status(204));
+    let remote_ip = client_ip(req);
+    if !captcha
+        .verify(payload.captcha.as_deref(), remote_ip.as_deref())
+        .await
+    {
+        return problem_response(403, "Forbidden", "captcha_failed");
+    }
+
+    if !email_valid {
+        return problem_field_response(422, "Unprocessable Entity", "invalid_body", "email");
     }
 
     let user = db
@@ -741,15 +798,60 @@ mod tests {
     }
 
     #[test]
+    fn oauth_only_sentinel_never_verifies_and_uses_dummy_hash_for_equal_timing() {
+        assert!(!is_valid_phc_hash(OAUTH_ONLY_PASSWORD_HASH));
+        assert!(!is_valid_phc_hash(""));
+        assert!(!is_valid_phc_hash("not-a-phc"));
+
+        let (selected, usable) = select_verification_hash(Some(OAUTH_ONLY_PASSWORD_HASH));
+        assert_eq!(selected, DUMMY_PASSWORD_HASH);
+        assert!(!usable);
+
+        let (selected_none, usable_none) = select_verification_hash(None);
+        assert_eq!(selected_none, DUMMY_PASSWORD_HASH);
+        assert!(!usable_none);
+
+        for candidate in ["correct-horse-battery", "!oauth", ""] {
+            let (ok_raw, _) = verify_password_argon2id(candidate, OAUTH_ONLY_PASSWORD_HASH);
+            assert!(!ok_raw, "!oauth must never verify for password {candidate:?}");
+            let (ok_dummy, _) = verify_password_argon2id(candidate, selected);
+            assert!(!ok_dummy);
+        }
+
+        let (real_phc, _) = hash_password_argon2id("correct-horse-battery").expect("hash");
+        let (selected_real, usable_real) = select_verification_hash(Some(&real_phc));
+        assert_eq!(selected_real, real_phc);
+        assert!(usable_real);
+    }
+
+    #[test]
     fn credentials_and_token_bodies_reject_unknown_fields() {
         let raw = br#"{"email":"a@example.com","password":"correct-horse-battery","isAdmin":true}"#;
         assert!(serde_json::from_slice::<Credentials>(raw).is_err());
+
+        let reg_extra = br#"{"email":"a@example.com","password":"correct-horse-battery","captcha":"fake-pass","isAdmin":true}"#;
+        assert!(serde_json::from_slice::<RegisterBody>(reg_extra).is_err());
+
+        let reg_wrong_type =
+            br#"{"email":"a@example.com","password":"correct-horse-battery","captcha":123}"#;
+        assert!(serde_json::from_slice::<RegisterBody>(reg_wrong_type).is_err());
+
+        let reg_missing_captcha =
+            br#"{"email":"a@example.com","password":"correct-horse-battery"}"#;
+        let parsed_reg =
+            serde_json::from_slice::<RegisterBody>(reg_missing_captcha).expect("missing captcha parses");
+        assert_eq!(parsed_reg.captcha, None);
 
         let extra_token = br#"{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","extra":1}"#;
         assert!(serde_json::from_slice::<TokenBody>(extra_token).is_err());
 
         let extra_forgot = br#"{"email":"a@example.com","extra":1}"#;
         assert!(serde_json::from_slice::<ForgotPasswordBody>(extra_forgot).is_err());
+
+        let forgot_missing_captcha = br#"{"email":"a@example.com"}"#;
+        let parsed_forgot = serde_json::from_slice::<ForgotPasswordBody>(forgot_missing_captcha)
+            .expect("missing captcha parses");
+        assert_eq!(parsed_forgot.captcha, None);
 
         let extra_reset =
             br#"{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","password":"correct-horse-battery","extra":1}"#;

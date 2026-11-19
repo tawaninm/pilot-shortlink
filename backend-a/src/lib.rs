@@ -1,7 +1,9 @@
 pub mod auth;
+pub mod captcha;
 pub mod http;
 pub mod links;
 pub mod mail;
+pub mod oauth;
 pub mod session;
 
 use serde::Serialize;
@@ -27,6 +29,19 @@ pub fn path_pattern(path: &str) -> &'static str {
         "/api/auth/verify-email/resend" => "/api/auth/verify-email/resend",
         "/api/auth/password/forgot" => "/api/auth/password/forgot",
         "/api/auth/password/reset" => "/api/auth/password/reset",
+        "/api/config" => "/api/config",
+        _ if path.starts_with("/api/auth/oauth/") => {
+            let rest = &path["/api/auth/oauth/".len()..];
+            match rest.split_once('/') {
+                Some((provider, "start")) if !provider.is_empty() => {
+                    "/api/auth/oauth/{provider}/start"
+                }
+                Some((provider, "callback")) if !provider.is_empty() => {
+                    "/api/auth/oauth/{provider}/callback"
+                }
+                _ => "/api/*",
+            }
+        }
         "/api/me" => "/api/me",
         "/api/links" => "/api/links",
         _ if path.starts_with("/api/links/") => {
@@ -166,12 +181,17 @@ async fn route_request(
             return Ok((http::problem_response(404, "Not Found", "not_found")?, None));
         }
 
+        if method == Method::Get && path == "/api/config" {
+            return Ok((captcha::handle_config(env, &app_origin)?, None));
+        }
+
         let db = env.d1("DB")?;
         let mailer = mail::EnvMailer::from_env(env);
+        let captcha_verifier = captcha::EnvCaptchaVerifier::from_env(env, &app_origin);
 
         return match (method, path.as_str()) {
             (Method::Post, "/api/auth/register") => {
-                auth::handle_register(req, &db, &app_origin, mailer, ctx).await
+                auth::handle_register(req, &db, &app_origin, mailer, &captcha_verifier, ctx).await
             }
             (Method::Post, "/api/auth/login") => auth::handle_login(req, &db).await,
             (Method::Post, "/api/auth/logout") => Ok((auth::handle_logout(req, &db).await?, None)),
@@ -183,11 +203,40 @@ async fn route_request(
                 None,
             )),
             (Method::Post, "/api/auth/password/forgot") => Ok((
-                auth::handle_forgot_password(req, &db, &app_origin, mailer, ctx).await?,
+                auth::handle_forgot_password(
+                    req,
+                    &db,
+                    &app_origin,
+                    mailer,
+                    &captcha_verifier,
+                    ctx,
+                )
+                .await?,
                 None,
             )),
             (Method::Post, "/api/auth/password/reset") => {
                 auth::handle_reset_password(req, &db).await
+            }
+            (Method::Get, p) if p.starts_with("/api/auth/oauth/") => {
+                let rest = &p["/api/auth/oauth/".len()..];
+                match rest.split_once('/') {
+                    Some((raw_provider, "start")) => match oauth::Provider::parse(raw_provider) {
+                        Some(provider) => Ok((
+                            oauth::handle_oauth_start(env, &db, &app_origin, provider).await?,
+                            None,
+                        )),
+                        None => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
+                    },
+                    Some((raw_provider, "callback")) => match oauth::Provider::parse(raw_provider) {
+                        Some(provider) => Ok((
+                            oauth::handle_oauth_callback(req, env, &db, &app_origin, provider)
+                                .await?,
+                            None,
+                        )),
+                        None => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
+                    },
+                    _ => Ok((http::problem_response(404, "Not Found", "not_found")?, None)),
+                }
             }
             (Method::Get, "/api/me") => Ok((auth::handle_me(req, &db).await?, None)),
             (Method::Get, "/api/links") => Ok((links::handle_list_links(req, &db).await?, None)),
@@ -313,6 +362,20 @@ mod tests {
             path_pattern("/api/auth/password/reset"),
             "/api/auth/password/reset"
         );
+        assert_eq!(path_pattern("/api/config"), "/api/config");
+        assert_eq!(
+            path_pattern("/api/auth/oauth/google/start"),
+            "/api/auth/oauth/{provider}/start"
+        );
+        assert_eq!(
+            path_pattern("/api/auth/oauth/github/callback"),
+            "/api/auth/oauth/{provider}/callback"
+        );
+        assert_eq!(
+            path_pattern("/api/auth/oauth/twitter/callback"),
+            "/api/auth/oauth/{provider}/callback"
+        );
+        assert_eq!(path_pattern("/api/auth/oauth/google/other"), "/api/*");
         assert_eq!(path_pattern("/assets/index-IjLlgpqB.js"), "/assets/*");
         assert_eq!(path_pattern("/abc1234"), "/{code}");
         assert_eq!(path_pattern("/admin"), "/*");
@@ -385,6 +448,14 @@ mod tests {
             auth_log,
             r#"{"method":"POST","path":"/api/auth/login","status":200,"ms":60,"hash_ms":54}"#
         );
+
+        let oauth_cb_log =
+            format_request_log("GET", "/api/auth/oauth/secret-provider/callback", 302, 12);
+        assert_eq!(
+            oauth_cb_log,
+            r#"{"method":"GET","path":"/api/auth/oauth/{provider}/callback","status":302,"ms":12}"#
+        );
+        assert!(!oauth_cb_log.contains("secret-provider"));
     }
 
     #[test]

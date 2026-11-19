@@ -2,7 +2,7 @@ use serde::Serialize;
 use worker::*;
 
 /// Content-Security-Policy applied to every HTML response (OWASP A02).
-pub const HTML_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+pub const HTML_CSP: &str = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 /// Referrer-Policy applied to every HTML response (OWASP A02).
 pub const HTML_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
@@ -280,6 +280,38 @@ pub fn now_sec() -> i64 {
     (now_ms() / 1000) as i64
 }
 
+/// Reads an optional non-empty string binding from Cloudflare Worker `Env` (checks secrets then vars).
+pub fn read_env_string(env: &Env, name: &str) -> Option<String> {
+    env.secret(name)
+        .map(|s| s.to_string())
+        .or_else(|_| env.var(name).map(|v| v.to_string()))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extracts the client IP from Cloudflare's `CF-Connecting-IP` header, if present and non-empty.
+pub fn client_ip(req: &Request) -> Option<String> {
+    req.headers()
+        .get("CF-Connecting-IP")
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Encodes `(key, value)` pairs as `application/x-www-form-urlencoded` using `worker::Url`.
+pub fn encode_form_urlencoded(pairs: &[(&str, &str)]) -> String {
+    let mut url = Url::parse("http://localhost/").expect("static URL parses");
+    {
+        let mut query = url.query_pairs_mut();
+        for &(k, v) in pairs {
+            query.append_pair(k, v);
+        }
+    }
+    url.query().unwrap_or("").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,10 +345,18 @@ mod tests {
         assert!(!is_html_content_type("text/javascript"));
 
         assert!(HTML_CSP.contains("default-src 'self'"));
+        assert!(HTML_CSP.contains("script-src 'self' https://challenges.cloudflare.com"));
+        assert!(HTML_CSP.contains("frame-src https://challenges.cloudflare.com"));
         assert!(HTML_CSP.contains("frame-ancestors 'none'"));
+        assert!(!HTML_CSP.contains("'unsafe-inline'"));
         assert!(!HTML_CSP.contains("'unsafe-eval'"));
         assert_eq!(HTML_REFERRER_POLICY, "strict-origin-when-cross-origin");
         assert_eq!(HTML_HSTS, "max-age=31536000; includeSubDomains");
+
+        assert_eq!(
+            encode_form_urlencoded(&[("a", "1"), ("u", "https://example.com/a b")]),
+            "a=1&u=https%3A%2F%2Fexample.com%2Fa+b"
+        );
     }
 
     #[test]
