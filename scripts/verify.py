@@ -125,6 +125,9 @@ def backend_a(filters: list[str], tests=None) -> None:
     run("clippy", ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"], cwd=a)
     run("cargo test", ["cargo", "test"], cwd=a)
     run("migrate", [*WRANGLER, "d1", "migrations", "apply", "DB", "--local"], cwd=a)
+    # Local D1 keeps state between runs; the contract suite alone makes ~21 OAuth callbacks against a 30 per 10 min
+    # per-IP limit, so a second run inside 10 minutes would trip it. Start every run with empty counters.
+    run("reset rate limits", [*WRANGLER, "d1", "execute", "DB", "--local", "--command", "DELETE FROM rate_limits"], cwd=a)
     url = "http://localhost:8787"
     # MAIL_MODE=capture only on the command line, never in wrangler.toml, so it cannot reach production (AC-V8)
     fake_vars = [arg for k, v in FAKES.items() for arg in ("--var", f"{k}:{v}")]

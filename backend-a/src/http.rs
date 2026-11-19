@@ -2,7 +2,7 @@ use serde::Serialize;
 use worker::*;
 
 /// Content-Security-Policy applied to every HTML response (OWASP A02).
-pub const HTML_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+pub const HTML_CSP: &str = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 /// Referrer-Policy applied to every HTML response (OWASP A02).
 pub const HTML_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
@@ -280,9 +280,138 @@ pub fn now_sec() -> i64 {
     (now_ms() / 1000) as i64
 }
 
+/// Reads an optional non-empty string binding from Cloudflare Worker `Env` (checks secrets then vars).
+pub fn read_env_string(env: &Env, name: &str) -> Option<String> {
+    env.secret(name)
+        .map(|s| s.to_string())
+        .or_else(|_| env.var(name).map(|v| v.to_string()))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extracts the client IP from Cloudflare's `CF-Connecting-IP` header, if present and non-empty.
+pub fn client_ip(req: &Request) -> Option<String> {
+    req.headers()
+        .get("CF-Connecting-IP")
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Encodes `(key, value)` pairs as `application/x-www-form-urlencoded` using `worker::Url`.
+pub fn encode_form_urlencoded(pairs: &[(&str, &str)]) -> String {
+    let mut url = Url::parse("http://localhost/").expect("static URL parses");
+    {
+        let mut query = url.query_pairs_mut();
+        for &(k, v) in pairs {
+            query.append_pair(k, v);
+        }
+    }
+    url.query().unwrap_or("").to_string()
+}
+
+/// Timeout applied to outbound OAuth and Turnstile HTTP fetches (F5).
+pub const OUTBOUND_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaceOutcome<A, B> {
+    First(A),
+    Second(B),
+}
+
+/// Polls two futures concurrently and returns the output of whichever resolves first.
+pub async fn race_first<F1, F2>(fut1: F1, fut2: F2) -> RaceOutcome<F1::Output, F2::Output>
+where
+    F1: std::future::Future,
+    F2: std::future::Future,
+{
+    let mut fut1 = std::pin::pin!(fut1);
+    let mut fut2 = std::pin::pin!(fut2);
+    std::future::poll_fn(|cx| {
+        if let std::task::Poll::Ready(out) = fut1.as_mut().poll(cx) {
+            return std::task::Poll::Ready(RaceOutcome::First(out));
+        }
+        if let std::task::Poll::Ready(out) = fut2.as_mut().poll(cx) {
+            return std::task::Poll::Ready(RaceOutcome::Second(out));
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundFetchError {
+    Timeout,
+    Transport,
+    HttpStatus(u16),
+    BodyRead,
+}
+
+/// Executes an outbound `Request` and reads its response text within `timeout`,
+/// aborting the underlying `Fetch` via `AbortController` if the deadline elapses.
+pub async fn fetch_text_with_timeout(
+    req: Request,
+    timeout: std::time::Duration,
+) -> std::result::Result<String, OutboundFetchError> {
+    let controller = AbortController::default();
+    let signal = controller.signal();
+
+    let work = async {
+        let mut res = Fetch::Request(req)
+            .send_with_signal(&signal)
+            .await
+            .map_err(|_| OutboundFetchError::Transport)?;
+        let status = res.status_code();
+        if !(200..300).contains(&status) {
+            return Err(OutboundFetchError::HttpStatus(status));
+        }
+        res.text().await.map_err(|_| OutboundFetchError::BodyRead)
+    };
+
+    match race_first(work, Delay::from(timeout)).await {
+        RaceOutcome::First(res) => res,
+        RaceOutcome::Second(()) => {
+            controller.abort();
+            Err(OutboundFetchError::Timeout)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn race_first_selects_completed_branch_without_waiting_on_pending_branch() {
+        fn block_on_ready<F: std::future::Future>(mut fut: F) -> F::Output {
+            use std::pin::Pin;
+            use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
+
+            fn noop_raw_waker() -> RawWaker {
+                fn no_op(_: *const ()) {}
+                fn clone(_: *const ()) -> RawWaker {
+                    noop_raw_waker()
+                }
+                static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
+                RawWaker::new(std::ptr::null(), &VTABLE)
+            }
+            let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
+            let mut ctx = TaskContext::from_waker(&waker);
+            let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+            match pinned.poll(&mut ctx) {
+                Poll::Ready(val) => val,
+                Poll::Pending => panic!("test future must resolve immediately"),
+            }
+        }
+
+        let work_wins = block_on_ready(race_first(async { "ok" }, std::future::pending::<()>()));
+        assert_eq!(work_wins, RaceOutcome::First("ok"));
+
+        let timeout_wins = block_on_ready(race_first(std::future::pending::<&str>(), async {}));
+        assert_eq!(timeout_wins, RaceOutcome::Second(()));
+    }
 
     #[test]
     fn problem_json_body_escapes_quotes_and_newlines() {
@@ -313,10 +442,18 @@ mod tests {
         assert!(!is_html_content_type("text/javascript"));
 
         assert!(HTML_CSP.contains("default-src 'self'"));
+        assert!(HTML_CSP.contains("script-src 'self' https://challenges.cloudflare.com"));
+        assert!(HTML_CSP.contains("frame-src https://challenges.cloudflare.com"));
         assert!(HTML_CSP.contains("frame-ancestors 'none'"));
+        assert!(!HTML_CSP.contains("'unsafe-inline'"));
         assert!(!HTML_CSP.contains("'unsafe-eval'"));
         assert_eq!(HTML_REFERRER_POLICY, "strict-origin-when-cross-origin");
         assert_eq!(HTML_HSTS, "max-age=31536000; includeSubDomains");
+
+        assert_eq!(
+            encode_form_urlencoded(&[("a", "1"), ("u", "https://example.com/a b")]),
+            "a=1&u=https%3A%2F%2Fexample.com%2Fa+b"
+        );
     }
 
     #[test]
