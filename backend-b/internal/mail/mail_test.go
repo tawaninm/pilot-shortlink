@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -144,6 +145,20 @@ func TestResend(t *testing.T) {
 			srv.Close()
 			if err == nil || strings.Contains(err.Error(), "secret@example.test") {
 				t.Fatalf("code %d: err=%v", code, err)
+			}
+		}
+	})
+
+	t.Run("redacts APIKey in String and GoString", func(t *testing.T) {
+		r := NewResend("re_top_secret_key", "from@example.test")
+		for _, formatted := range []string{
+			fmt.Sprintf("%+v", r),
+			fmt.Sprintf("%#v", r),
+			fmt.Sprintf("%+v", *r),
+			fmt.Sprintf("%#v", *r),
+		} {
+			if strings.Contains(formatted, "re_top_secret_key") || !strings.Contains(formatted, "[redacted]") {
+				t.Fatalf("Resend leaked or lacked [redacted]: %s", formatted)
 			}
 		}
 	})

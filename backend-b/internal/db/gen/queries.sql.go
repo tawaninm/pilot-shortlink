@@ -468,7 +468,7 @@ func (q *Queries) GetUserByEmailForUpdate(ctx context.Context, email string) (Ge
 	return i, err
 }
 
-const insertOAuthAccount = `-- name: InsertOAuthAccount :exec
+const insertOAuthAccount = `-- name: InsertOAuthAccount :execrows
 INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ($1, $2, $3)
 ON CONFLICT (provider, subject) DO NOTHING
 `
@@ -479,9 +479,12 @@ type InsertOAuthAccountParams struct {
 	UserID   int64
 }
 
-func (q *Queries) InsertOAuthAccount(ctx context.Context, arg InsertOAuthAccountParams) error {
-	_, err := q.db.Exec(ctx, insertOAuthAccount, arg.Provider, arg.Subject, arg.UserID)
-	return err
+func (q *Queries) InsertOAuthAccount(ctx context.Context, arg InsertOAuthAccountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertOAuthAccount, arg.Provider, arg.Subject, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const linkDaily = `-- name: LinkDaily :many

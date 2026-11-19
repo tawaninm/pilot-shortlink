@@ -48,3 +48,24 @@ func TestCheckRenderGuardsAllowsFakeWithoutRender(t *testing.T) {
 		t.Fatalf("checkRenderGuards without RENDER returned %v, want nil", err)
 	}
 }
+
+func TestParseTrustedProxyHops(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want int
+	}{
+		{"", 0},
+		{"0", 0},
+		{"1", 1},
+		{" 2 ", 2},
+		{"-1", 0},
+		{"-100", 0},
+		{"not-a-number", 0},
+		{"1.5", 0},
+	}
+	for _, tc := range cases {
+		if got := parseTrustedProxyHops(tc.raw); got != tc.want {
+			t.Errorf("parseTrustedProxyHops(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
+	}
+}

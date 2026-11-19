@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,6 +45,14 @@ func checkRenderGuards() error {
 	return nil
 }
 
+func parseTrustedProxyHops(raw string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func run(log *slog.Logger) error {
 	dbURL, origin := os.Getenv("DATABASE_URL"), os.Getenv("APP_ORIGIN")
 	if dbURL == "" || origin == "" {
@@ -68,6 +78,7 @@ func run(log *slog.Logger) error {
 	mailer, capture := mail.FromEnv()
 	oauthProviders := oauth.FromEnv(origin)
 	captchaVerifier, turnstileSiteKey := captcha.FromEnv(origin)
+	trustedProxyHops := parseTrustedProxyHops(os.Getenv("TRUSTED_PROXY_HOPS"))
 	srv := &http.Server{
 		Addr: ":" + port,
 		Handler: api.NewHandler(api.Config{
@@ -79,6 +90,7 @@ func run(log *slog.Logger) error {
 			OAuth:            oauthProviders,
 			Captcha:          captchaVerifier,
 			TurnstileSiteKey: turnstileSiteKey,
+			TrustedProxyHops: trustedProxyHops,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,

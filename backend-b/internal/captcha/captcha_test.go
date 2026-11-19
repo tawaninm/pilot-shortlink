@@ -76,6 +76,9 @@ func TestCloudflareVerifier(t *testing.T) {
 		if strings.Contains(fmt.Sprint(c), "super-secret") {
 			t.Fatalf("Cloudflare.String leaked secret: %s", fmt.Sprint(c))
 		}
+		if strings.Contains(fmt.Sprintf("%#v", c), "super-secret") || !strings.Contains(fmt.Sprintf("%#v", c), "[redacted]") {
+			t.Fatalf("Cloudflare.GoString leaked or lacked [redacted]: %#v", c)
+		}
 
 		reply = `{"success":true}`
 		if !c.Verify(context.Background(), "tok-1", "203.0.113.5") {

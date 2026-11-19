@@ -17,7 +17,9 @@ CREATE TABLE oauth_states (
     verifier   text NOT NULL,
     expires_at timestamptz NOT NULL
 );
+CREATE INDEX oauth_states_expires_idx ON oauth_states (expires_at);
 
 -- +goose Down
+DROP INDEX oauth_states_expires_idx;
 DROP TABLE oauth_states;
 DROP TABLE oauth_accounts;

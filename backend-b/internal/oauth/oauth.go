@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -158,13 +159,21 @@ func (p ProviderConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("provider", string(p.Provider)),
 		slog.String("authorize_url", p.AuthorizeURL),
-		slog.String("client_secret", "<redacted>"),
+		slog.String("client_secret", "[redacted]"),
 	)
 }
 
 // String redacts ClientSecret if formatted via fmt (I7).
 func (p ProviderConfig) String() string {
-	return "oauth.ProviderConfig{provider=" + string(p.Provider) + ", client_secret=<redacted>}"
+	return "oauth.ProviderConfig{provider=" + string(p.Provider) + ", client_secret=[redacted]}"
+}
+
+// GoString redacts ClientSecret if formatted via %#v (I7).
+func (p ProviderConfig) GoString() string {
+	return fmt.Sprintf(
+		"oauth.ProviderConfig{Provider:%q, AuthorizeURL:%q, TokenURL:%q, UserInfoURL:%q, EmailsURL:%q, Scope:%q, ClientID:%q, ClientSecret:%q}",
+		p.Provider, p.AuthorizeURL, p.TokenURL, p.UserInfoURL, p.EmailsURL, p.Scope, p.ClientID, "[redacted]",
+	)
 }
 
 func (p *ProviderConfig) httpClient() *http.Client {
@@ -203,6 +212,35 @@ type Env struct {
 	GoogleClientSecret string
 	GitHubClientID     string
 	GitHubClientSecret string
+}
+
+// LogValue redacts client secrets if Env is ever passed to slog (I7).
+func (e Env) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("app_origin", e.AppOrigin),
+		slog.String("mode", e.Mode),
+		slog.String("fake_base", e.FakeBase),
+		slog.String("google_client_id", e.GoogleClientID),
+		slog.String("google_client_secret", "[redacted]"),
+		slog.String("github_client_id", e.GitHubClientID),
+		slog.String("github_client_secret", "[redacted]"),
+	)
+}
+
+// String redacts client secrets when formatted via %v / %+v (I7).
+func (e Env) String() string {
+	return fmt.Sprintf(
+		"oauth.Env{AppOrigin:%q Mode:%q FakeBase:%q GoogleClientID:%q GoogleClientSecret:%q GitHubClientID:%q GitHubClientSecret:%q}",
+		e.AppOrigin, e.Mode, e.FakeBase, e.GoogleClientID, "[redacted]", e.GitHubClientID, "[redacted]",
+	)
+}
+
+// GoString redacts client secrets when formatted via %#v (I7).
+func (e Env) GoString() string {
+	return fmt.Sprintf(
+		"oauth.Env{AppOrigin:%q, Mode:%q, FakeBase:%q, GoogleClientID:%q, GoogleClientSecret:%q, GitHubClientID:%q, GitHubClientSecret:%q}",
+		e.AppOrigin, e.Mode, e.FakeBase, e.GoogleClientID, "[redacted]", e.GitHubClientID, "[redacted]",
+	)
 }
 
 // FromEnv builds Providers from process environment variables and appOrigin.

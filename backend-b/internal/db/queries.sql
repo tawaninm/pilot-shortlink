@@ -112,7 +112,7 @@ DELETE FROM oauth_states WHERE state_hash = $1 AND provider = $2 AND expires_at 
 -- name: GetOAuthAccountUserID :one
 SELECT user_id FROM oauth_accounts WHERE provider = $1 AND subject = $2;
 
--- name: InsertOAuthAccount :exec
+-- name: InsertOAuthAccount :execrows
 INSERT INTO oauth_accounts (provider, subject, user_id) VALUES ($1, $2, $3)
 ON CONFLICT (provider, subject) DO NOTHING;
 

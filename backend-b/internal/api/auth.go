@@ -170,7 +170,7 @@ type registerBody struct {
 }
 
 func (s *server) verifyCaptcha(r *http.Request, token *string) bool {
-	if token == nil || *token == "" || s.Captcha == nil || !s.Captcha.Verify(r.Context(), *token, clientIP(r)) {
+	if token == nil || *token == "" || s.Captcha == nil || !s.Captcha.Verify(r.Context(), *token, s.clientIP(r)) {
 		s.Log.Info("captcha_failed") // never log the token, IP, or email (I7)
 		return false
 	}

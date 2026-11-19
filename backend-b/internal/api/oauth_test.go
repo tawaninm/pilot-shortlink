@@ -14,6 +14,7 @@ import (
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/api"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/auth"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/captcha"
+	"github.com/tawaninm/pilot-shortlink/backend-b/internal/db/gen"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/mail"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/oauth"
 	"github.com/tawaninm/pilot-shortlink/backend-b/internal/testdb"
@@ -317,4 +318,247 @@ func TestOAuthAndCaptcha(t *testing.T) {
 			t.Fatalf("config key = %d %s (err=%v)", rec.Code, rec.Body.String(), err)
 		}
 	})
+
+	t.Run("oauth start prunes stale rate_limits rows", func(t *testing.T) {
+		now := time.Date(2026, 11, 19, 14, 0, 0, 0, time.UTC)
+		staleWindow := now.Add(-2 * time.Hour)
+		if _, err := pool.Exec(context.Background(),
+			`INSERT INTO rate_limits (key, window_start, count) VALUES ('oauth_start:stale', $1, 5)`, staleWindow); err != nil {
+			t.Fatal(err)
+		}
+
+		idp := httptest.NewServer(http.NotFoundHandler())
+		defer idp.Close()
+
+		h := api.NewHandler(api.Config{
+			Pool:             pool,
+			AppOrigin:        localOrigin,
+			Now:              func() time.Time { return now },
+			TrustedProxyHops: 1,
+			OAuth: oauth.Resolve(oauth.Env{
+				AppOrigin: localOrigin,
+				Mode:      "fake",
+				FakeBase:  idp.URL,
+			}),
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/oauth/google/start", nil)
+		req.RemoteAddr = "10.0.0.1:1234"
+		req.Header.Set("X-Forwarded-For", "9.9.9.9, 203.0.113.55")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("start = %d, want 302", rec.Code)
+		}
+
+		var staleLeft int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM rate_limits WHERE key = 'oauth_start:stale'`).Scan(&staleLeft); err != nil || staleLeft != 0 {
+			t.Fatalf("stale rate_limits row count = %d (err=%v), want 0", staleLeft, err)
+		}
+		var realKeyCount int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM rate_limits WHERE key = 'oauth_start:203.0.113.55'`).Scan(&realKeyCount); err != nil || realKeyCount != 1 {
+			t.Fatalf("expected oauth_start:203.0.113.55 rate row, got %d (err=%v)", realKeyCount, err)
+		}
+	})
+
+	t.Run("InsertOAuthAccount returns 1 then 0 rows on conflict", func(t *testing.T) {
+		ctx := context.Background()
+		q := gen.New(pool)
+		uid1, err := q.CreateUser(ctx, gen.CreateUserParams{Email: "race1@example.test", PasswordHash: auth.OAuthOnlyPasswordHash})
+		if err != nil {
+			t.Fatal(err)
+		}
+		uid2, err := q.CreateUser(ctx, gen.CreateUserParams{Email: "race2@example.test", PasswordHash: auth.OAuthOnlyPasswordHash})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		n1, err := q.InsertOAuthAccount(ctx, gen.InsertOAuthAccountParams{
+			Provider: "google",
+			Subject:  "sub-race-1",
+			UserID:   uid1,
+		})
+		if err != nil || n1 != 1 {
+			t.Fatalf("first InsertOAuthAccount = (%d, %v), want (1, nil)", n1, err)
+		}
+
+		n2, err := q.InsertOAuthAccount(ctx, gen.InsertOAuthAccountParams{
+			Provider: "google",
+			Subject:  "sub-race-1",
+			UserID:   uid2,
+		})
+		if err != nil || n2 != 0 {
+			t.Fatalf("second InsertOAuthAccount = (%d, %v), want (0, nil)", n2, err)
+		}
+
+		gotUID, err := q.GetOAuthAccountUserID(ctx, gen.GetOAuthAccountUserIDParams{
+			Provider: "google",
+			Subject:  "sub-race-1",
+		})
+		if err != nil || gotUID != uid1 {
+			t.Fatalf("winning user_id = (%d, %v), want %d", gotUID, err, uid1)
+		}
+	})
+
+	t.Run("callback outbound deadline redirects to error page", func(t *testing.T) {
+		idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/google/token" {
+				time.Sleep(150 * time.Millisecond)
+				_, _ = w.Write([]byte(`{"access_token":"late"}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer idp.Close()
+
+		var logs syncBuffer
+		h := api.NewHandler(api.Config{
+			Pool:      pool,
+			AppOrigin: localOrigin,
+			Log:       slog.New(slog.NewJSONHandler(&logs, nil)),
+			OAuth: oauth.Resolve(oauth.Env{
+				AppOrigin: localOrigin,
+				Mode:      "fake",
+				FakeBase:  idp.URL,
+			}),
+		})
+
+		startReq := httptest.NewRequest(http.MethodGet, "/api/auth/oauth/google/start", nil)
+		startReq.RemoteAddr = "198.51.100.20:1234"
+		startRec := httptest.NewRecorder()
+		h.ServeHTTP(startRec, startReq)
+		authURL, _ := url.Parse(startRec.Header().Get("Location"))
+		state := authURL.Query().Get("state")
+		var stateCookie *http.Cookie
+		for _, c := range startRec.Result().Cookies() {
+			if c.Name == "__Host-oauth" {
+				stateCookie = c
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		cbReq := httptest.NewRequest(http.MethodGet, "/api/auth/oauth/google/callback?code=c1&state="+state, nil).WithContext(ctx)
+		cbReq.RemoteAddr = "198.51.100.20:1235"
+		cbReq.AddCookie(stateCookie)
+		cbRec := httptest.NewRecorder()
+		h.ServeHTTP(cbRec, cbReq)
+
+		if cbRec.Code != http.StatusFound || cbRec.Header().Get("Location") != "/login?error=oauth" {
+			t.Fatalf("timed out callback = %d Location=%q, want 302 /login?error=oauth", cbRec.Code, cbRec.Header().Get("Location"))
+		}
+		for _, c := range cbRec.Result().Cookies() {
+			if c.Name == "__Host-session" {
+				t.Fatal("timed out callback must not set session cookie")
+			}
+		}
+		if !strings.Contains(logs.String(), `"reason":"token_exchange_failed"`) {
+			t.Fatalf("expected token_exchange_failed log, got:\n%s", logs.String())
+		}
+	})
+}
+
+type spyCaptcha struct {
+	gotIP string
+}
+
+func (s *spyCaptcha) Verify(_ context.Context, _, remoteIP string) bool {
+	s.gotIP = remoteIP
+	return false
+}
+
+func TestClientIPTrustedProxyHops(t *testing.T) {
+	cases := []struct {
+		name       string
+		hops       int
+		xff        []string
+		remoteAddr string
+		want       string
+	}{
+		{
+			name:       "hops=1 ignores spoofed leading entry",
+			hops:       1,
+			xff:        []string{"9.9.9.9, 203.0.113.7"},
+			remoteAddr: "10.0.0.1:1234",
+			want:       "203.0.113.7",
+		},
+		{
+			name:       "hops=0 ignores present XFF",
+			hops:       0,
+			xff:        []string{"203.0.113.7"},
+			remoteAddr: "198.51.100.5:4321",
+			want:       "198.51.100.5",
+		},
+		{
+			name:       "negative hops treated as 0",
+			hops:       -2,
+			xff:        []string{"203.0.113.7"},
+			remoteAddr: "198.51.100.5:4321",
+			want:       "198.51.100.5",
+		},
+		{
+			name:       "invalid XFF entry falls back to RemoteAddr",
+			hops:       1,
+			xff:        []string{"9.9.9.9, not-an-ip"},
+			remoteAddr: "198.51.100.5:4321",
+			want:       "198.51.100.5",
+		},
+		{
+			name:       "fewer entries than hops falls back to RemoteAddr",
+			hops:       2,
+			xff:        []string{"203.0.113.7"},
+			remoteAddr: "198.51.100.5:4321",
+			want:       "198.51.100.5",
+		},
+		{
+			name:       "hops=2 picks second from right across multiple headers",
+			hops:       2,
+			xff:        []string{"9.9.9.9", "203.0.113.7, 10.0.0.2"},
+			remoteAddr: "10.0.0.1:1234",
+			want:       "203.0.113.7",
+		},
+		{
+			name:       "IPv6 in XFF works",
+			hops:       1,
+			xff:        []string{"9.9.9.9, 2001:0db8::1"},
+			remoteAddr: "[::1]:1234",
+			want:       "2001:db8::1",
+		},
+		{
+			name:       "IPv6 RemoteAddr fallback strips port",
+			hops:       0,
+			xff:        []string{"203.0.113.7"},
+			remoteAddr: "[2001:db8::2]:4321",
+			want:       "2001:db8::2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &spyCaptcha{}
+			h := api.NewHandler(api.Config{
+				AppOrigin:        testOrigin,
+				Captcha:          spy,
+				TrustedProxyHops: tc.hops,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/auth/password/forgot",
+				strings.NewReader(`{"email":"u@example.test","captcha":"tok"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", testOrigin)
+			req.RemoteAddr = tc.remoteAddr
+			for _, v := range tc.xff {
+				req.Header.Add("X-Forwarded-For", v)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+			if spy.gotIP != tc.want {
+				t.Fatalf("clientIP = %q, want %q", spy.gotIP, tc.want)
+			}
+		})
+	}
 }

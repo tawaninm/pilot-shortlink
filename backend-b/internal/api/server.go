@@ -27,6 +27,7 @@ type Config struct {
 	OAuth            *oauth.Providers // configured Google/GitHub providers
 	Captcha          captcha.Verifier // Turnstile verifier; nil fails closed
 	TurnstileSiteKey *string          // public Turnstile site key for GET /api/config; nil in fake mode
+	TrustedProxyHops int              // number of trusted proxies appending to X-Forwarded-For; <= 0 ignores XFF
 }
 
 type server struct {

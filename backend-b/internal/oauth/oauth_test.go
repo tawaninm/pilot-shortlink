@@ -93,6 +93,36 @@ func TestResolveIgnoresFakeModeForNonLocalOrigin(t *testing.T) {
 	if strings.Contains(fmt.Sprint(g), "real-gsec") {
 		t.Fatalf("ProviderConfig.String leaked client secret: %s", fmt.Sprint(g))
 	}
+	if strings.Contains(fmt.Sprintf("%#v", g), "real-gsec") || !strings.Contains(fmt.Sprintf("%#v", g), "[redacted]") {
+		t.Fatalf("ProviderConfig.GoString leaked or lacked [redacted]: %#v", g)
+	}
+}
+
+func TestEnvRedaction(t *testing.T) {
+	env := Env{
+		AppOrigin:          "https://pilot-shortlink-b.onrender.com",
+		Mode:               "",
+		FakeBase:           "",
+		GoogleClientID:     "gid-public",
+		GoogleClientSecret: "google-super-secret-123",
+		GitHubClientID:     "ghid-public",
+		GitHubClientSecret: "github-super-secret-456",
+	}
+	for _, formatted := range []string{
+		fmt.Sprintf("%+v", env),
+		fmt.Sprintf("%#v", env),
+		fmt.Sprintf("%+v", &env),
+		fmt.Sprintf("%#v", &env),
+	} {
+		for _, secret := range []string{env.GoogleClientSecret, env.GitHubClientSecret} {
+			if strings.Contains(formatted, secret) {
+				t.Fatalf("formatted Env leaked %q: %s", secret, formatted)
+			}
+		}
+		if !strings.Contains(formatted, "[redacted]") {
+			t.Fatalf("formatted Env missing [redacted]: %s", formatted)
+		}
+	}
 }
 
 func TestResolveFakeModeLocalOrigin(t *testing.T) {

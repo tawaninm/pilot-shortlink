@@ -194,6 +194,11 @@ func TestSchema(t *testing.T) {
 		if _, err := pool.Exec(ctx, `INSERT INTO oauth_states (state_hash, provider, verifier, expires_at) VALUES ('h1', 'google', 'v2', now() + interval '10 minutes')`); err == nil {
 			t.Fatal("duplicate state_hash was accepted")
 		}
+		var idxCount int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'oauth_states' AND indexname = 'oauth_states_expires_idx'`), &idxCount)
+		if idxCount != 1 {
+			t.Fatalf("oauth_states_expires_idx count = %d, want 1", idxCount)
+		}
 	})
 
 	t.Run("down then up works (level 2: every migration has a down)", func(t *testing.T) {
@@ -205,6 +210,11 @@ func TestSchema(t *testing.T) {
 		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('oauth_accounts','oauth_states')`), &oauthTables)
 		if oauthTables != 0 {
 			t.Fatalf("00003 down left %d oauth tables", oauthTables)
+		}
+		var idxCount int
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'oauth_states_expires_idx'`), &idxCount)
+		if idxCount != 0 {
+			t.Fatalf("00003 down left oauth_states_expires_idx")
 		}
 		if err := db.Migrate(ctx, pool, "down"); err != nil {
 			t.Fatalf("down 00002: %v", err)
@@ -222,6 +232,10 @@ func TestSchema(t *testing.T) {
 		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('oauth_accounts','oauth_states')`), &oauthTables)
 		if oauthTables != 2 {
 			t.Fatalf("up again: got %d oauth tables, want 2", oauthTables)
+		}
+		mustScan(t, pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'oauth_states' AND indexname = 'oauth_states_expires_idx'`), &idxCount)
+		if idxCount != 1 {
+			t.Fatalf("up again: oauth_states_expires_idx count = %d, want 1", idxCount)
 		}
 	})
 }

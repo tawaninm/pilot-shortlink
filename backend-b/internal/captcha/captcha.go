@@ -4,6 +4,7 @@ package captcha
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -65,12 +66,17 @@ func NewCloudflare(secret string) *Cloudflare {
 
 // LogValue redacts Secret if a Cloudflare verifier is ever passed to slog (I7).
 func (c Cloudflare) LogValue() slog.Value {
-	return slog.GroupValue(slog.String("secret", "<redacted>"))
+	return slog.GroupValue(slog.String("secret", "[redacted]"))
 }
 
 // String redacts Secret if formatted via fmt (I7).
 func (c Cloudflare) String() string {
-	return "captcha.Cloudflare{secret=<redacted>}"
+	return "captcha.Cloudflare{secret=[redacted]}"
+}
+
+// GoString redacts Secret if formatted via %#v (I7).
+func (c Cloudflare) GoString() string {
+	return fmt.Sprintf("captcha.Cloudflare{Secret:%q, URL:%q}", "[redacted]", c.URL)
 }
 
 // Verify posts secret, response, and optional remoteip to Turnstile siteverify.

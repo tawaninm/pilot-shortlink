@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	oauthCookie        = "__Host-oauth"
-	oauthErrorLocation = "/login?error=oauth"
-	oauthStateTTL      = 10 * time.Minute
-	oauthRateWindow    = 10 * time.Minute
-	oauthRateMax       = 30
+	oauthCookie          = "__Host-oauth"
+	oauthErrorLocation   = "/login?error=oauth"
+	oauthStateTTL        = 10 * time.Minute
+	oauthRateWindow      = 10 * time.Minute
+	oauthRateMax         = 30
+	oauthOutboundTimeout = 10 * time.Second
 )
 
 type configResponse struct {
@@ -33,19 +34,31 @@ func (s *server) config(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, configResponse{TurnstileSiteKey: s.TurnstileSiteKey})
 }
 
-// clientIP returns the first address from X-Forwarded-For (set by Render's proxy)
-// and falls back to RemoteAddr (without port).
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := strings.TrimSpace(first); ip != "" {
-			return ip
-		}
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+func remoteAddrIP(remoteAddr string) string {
+	trimmed := strings.TrimSpace(remoteAddr)
+	if host, _, err := net.SplitHostPort(trimmed); err == nil && host != "" {
 		return host
 	}
-	return strings.TrimSpace(r.RemoteAddr)
+	return trimmed
+}
+
+// clientIP resolves the client IP using TrustedProxyHops:
+//   - <= 0: ignore X-Forwarded-For and return RemoteAddr (host part).
+//   - N >= 1: take the Nth comma-separated X-Forwarded-For entry from the right;
+//     must parse with net.ParseIP, otherwise fall back to RemoteAddr.
+func (s *server) clientIP(r *http.Request) string {
+	if s.TrustedProxyHops > 0 {
+		if xff := strings.Join(r.Header.Values("X-Forwarded-For"), ","); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) >= s.TrustedProxyHops {
+				candidate := strings.TrimSpace(parts[len(parts)-s.TrustedProxyHops])
+				if parsed := net.ParseIP(candidate); parsed != nil {
+					return parsed.String()
+				}
+			}
+		}
+	}
+	return remoteAddrIP(r.RemoteAddr)
 }
 
 func clearOAuthCookie(w http.ResponseWriter) {
@@ -83,12 +96,15 @@ func (s *server) oauthStart(w http.ResponseWriter, r *http.Request) {
 
 	// Rate limit per client IP before writing state rows.
 	n, err := s.q.BumpRate(ctx, gen.BumpRateParams{
-		Key:         "oauth_start:" + clientIP(r),
+		Key:         "oauth_start:" + s.clientIP(r),
 		WindowStart: now.Truncate(oauthRateWindow),
 	})
 	if err != nil {
 		s.redirectOAuthError(w, provider, "db_error", false)
 		return
+	}
+	if n == 1 {
+		_ = s.q.DeleteOldRates(ctx, now.Add(-time.Hour))
 	}
 	if n > oauthRateMax {
 		s.redirectOAuthError(w, provider, "rate_limited", false)
@@ -153,7 +169,7 @@ func (s *server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	now := s.Now()
 
 	n, err := s.q.BumpRate(ctx, gen.BumpRateParams{
-		Key:         "oauth_cb:" + clientIP(r),
+		Key:         "oauth_cb:" + s.clientIP(r),
 		WindowStart: now.Truncate(oauthRateWindow),
 	})
 	if err != nil {
@@ -204,13 +220,16 @@ func (s *server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	redirectURI := oauth.RedirectURI(s.AppOrigin, provider)
-	accessToken, err := prov.Exchange(ctx, code, redirectURI, verifier)
+	outCtx, cancel := context.WithTimeout(ctx, oauthOutboundTimeout)
+	defer cancel()
+
+	accessToken, err := prov.Exchange(outCtx, code, redirectURI, verifier)
 	if err != nil {
 		s.redirectOAuthError(w, provider, "token_exchange_failed", true)
 		return
 	}
 
-	identity, err := prov.Identity(ctx, accessToken)
+	identity, err := prov.Identity(outCtx, accessToken)
 	if err != nil || identity.Subject == "" {
 		s.redirectOAuthError(w, provider, "identity_fetch_failed", true)
 		return
@@ -266,12 +285,17 @@ func (s *server) resolveOAuthUser(ctx context.Context, provider oauth.Provider, 
 	now := pgtype.Timestamptz{Time: s.Now(), Valid: true}
 
 	linkExisting := func(user gen.GetUserByEmailForUpdateRow) string {
-		if err := qtx.InsertOAuthAccount(ctx, gen.InsertOAuthAccountParams{
+		rows, err := qtx.InsertOAuthAccount(ctx, gen.InsertOAuthAccountParams{
 			Provider: string(provider),
 			Subject:  id.Subject,
 			UserID:   user.ID,
-		}); err != nil {
+		})
+		if err != nil {
 			return "db_error"
+		}
+		if rows == 0 {
+			// Concurrent callback already linked (provider, subject); do not claim/wipe this user.
+			return ""
 		}
 		if !user.EmailVerified {
 			// Pre-hijack defense (I10, AC-O12): wipe squatter's password, sessions, and unused email tokens.
@@ -308,12 +332,24 @@ func (s *server) resolveOAuthUser(ctx context.Context, provider oauth.Provider, 
 		})
 		switch {
 		case err == nil:
-			if err := qtx.InsertOAuthAccount(ctx, gen.InsertOAuthAccountParams{
+			rows, err := qtx.InsertOAuthAccount(ctx, gen.InsertOAuthAccountParams{
 				Provider: string(provider),
 				Subject:  id.Subject,
 				UserID:   newID,
-			}); err != nil {
+			})
+			if err != nil {
 				return 0, "db_error"
+			}
+			if rows == 0 {
+				// Concurrent callback already linked (provider, subject); discard unused new user and return winning user_id.
+				uid, err = qtx.GetOAuthAccountUserID(ctx, gen.GetOAuthAccountUserIDParams{
+					Provider: string(provider),
+					Subject:  id.Subject,
+				})
+				if err != nil {
+					return 0, "db_error"
+				}
+				return uid, ""
 			}
 		case errors.Is(err, pgx.ErrNoRows):
 			existing, err := qtx.GetUserByEmailForUpdate(ctx, email)
